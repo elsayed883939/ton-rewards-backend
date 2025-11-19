@@ -22,11 +22,9 @@ const config = {
     referralBonus: 0.001
 };
 
-// 🔐 التحقق من توقيع تليجرام
+// 🔐 التحقق من توقيع تليجرام - آمن 100%
 function validateTelegramInitData(initData) {
     try {
-        console.log('🔐 Validating initData...');
-        
         if (!initData) {
             console.log('❌ No initData provided');
             return false;
@@ -35,9 +33,6 @@ function validateTelegramInitData(initData) {
         const urlParams = new URLSearchParams(initData);
         const hash = urlParams.get('hash');
         
-        console.log('📦 Hash exists:', !!hash);
-        console.log('👤 User data exists:', !!urlParams.get('user'));
-
         if (!hash) {
             console.log('❌ No hash in initData');
             return false;
@@ -45,7 +40,9 @@ function validateTelegramInitData(initData) {
 
         const dataToCheck = [];
         urlParams.forEach((val, key) => {
-            if (key !== 'hash') dataToCheck.push(`${key}=${val}`);
+            if (key !== 'hash') {
+                dataToCheck.push(`${key}=${val}`);
+            }
         });
         
         dataToCheck.sort();
@@ -57,7 +54,6 @@ function validateTelegramInitData(initData) {
         const calculatedHash = crypto.createHmac('sha256', secretKey)
             .update(dataCheckString).digest('hex');
 
-        console.log('🔢 Hashes match:', calculatedHash === hash);
         return calculatedHash === hash;
     } catch (error) {
         console.error('❌ Validation error:', error);
@@ -70,9 +66,13 @@ function parseTelegramUser(initData) {
     try {
         const urlParams = new URLSearchParams(initData);
         const userStr = urlParams.get('user');
-        return userStr ? JSON.parse(userStr) : null;
+        if (!userStr) return null;
+        
+        const user = JSON.parse(userStr);
+        if (!user.id) return null;
+        
+        return user;
     } catch (error) {
-        console.error('Error parsing Telegram user:', error);
         return null;
     }
 }
@@ -129,8 +129,6 @@ app.get('/api/user/:userId', async (req, res) => {
         const userId = req.params.userId;
         const initData = req.query.initData;
         
-        console.log(`📥 GET User Request: ${userId}`);
-        
         if (!validateTelegramInitData(initData)) {
             return res.status(401).json({ error: 'Invalid security signature' });
         }
@@ -165,8 +163,6 @@ app.post('/api/register', async (req, res) => {
     try {
         const { initData, referralCode } = req.body;
         
-        console.log('📥 Register Request received');
-        
         if (!validateTelegramInitData(initData)) {
             return res.status(401).json({ error: 'Invalid security signature' });
         }
@@ -182,7 +178,6 @@ app.post('/api/register', async (req, res) => {
         let user = await getUserFromDB(userId);
         
         if (user) {
-            console.log(`✅ User ${userId} already exists`);
             return res.json({ 
                 success: true, 
                 user: {
@@ -209,7 +204,6 @@ app.post('/api/register', async (req, res) => {
         user = await createUserInDB(newUser);
         
         if (user) {
-            console.log(`✅ New user created: ${userId}`);
             res.json({ 
                 success: true, 
                 user: {
@@ -236,8 +230,6 @@ app.post('/api/register', async (req, res) => {
 app.post('/api/watch-ad', async (req, res) => {
     try {
         const { initData } = req.body;
-        
-        console.log('📥 Watch Ad Request received');
         
         if (!validateTelegramInitData(initData)) {
             return res.status(401).json({ error: 'Invalid security signature' });
@@ -282,7 +274,6 @@ app.post('/api/watch-ad', async (req, res) => {
         const updatedUser = updateResult.rows[0];
         
         if (updatedUser) {
-            console.log(`✅ Ad watched by user ${userId}, earned: ${adReward} TON`);
             res.json({
                 success: true,
                 amount: adReward,
@@ -304,8 +295,6 @@ app.post('/api/watch-ad', async (req, res) => {
 app.post('/api/move-to-balance', async (req, res) => {
     try {
         const { initData } = req.body;
-        
-        console.log('📥 Move to Balance Request received');
         
         if (!validateTelegramInitData(initData)) {
             return res.status(401).json({ error: 'Invalid security signature' });
@@ -341,7 +330,6 @@ app.post('/api/move-to-balance', async (req, res) => {
         const updatedUser = updateResult.rows[0];
         
         if (updatedUser) {
-            console.log(`✅ Balance moved for user ${userId}, amount: ${earningWallet} TON`);
             res.json({
                 success: true,
                 newBalance: parseFloat(updatedUser.balance),
@@ -361,8 +349,6 @@ app.post('/api/move-to-balance', async (req, res) => {
 app.post('/api/withdraw', async (req, res) => {
     try {
         const { initData, amount, walletAddress, method } = req.body;
-        
-        console.log('📥 Withdraw Request received');
         
         if (!validateTelegramInitData(initData)) {
             return res.status(401).json({ error: 'Invalid security signature' });
@@ -404,7 +390,6 @@ app.post('/api/withdraw', async (req, res) => {
                 [userId, amount, walletAddress, method, 'pending']
             );
 
-            console.log(`✅ Withdrawal request submitted for user ${userId}, amount: ${amount} TON`);
             res.json({
                 success: true,
                 message: 'Withdrawal request submitted successfully',
@@ -418,15 +403,6 @@ app.post('/api/withdraw', async (req, res) => {
         console.error('Withdrawal error:', error);
         res.status(500).json({ error: 'Withdrawal failed' });
     }
-});
-
-// 🔧 endpoint للتست
-app.get('/api/test', (req, res) => {
-    res.json({ 
-        status: 'OK', 
-        message: 'Backend is working with Telegram verification',
-        timestamp: new Date().toISOString()
-    });
 });
 
 // 🚀 تشغيل السيرفر
