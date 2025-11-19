@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
+const { Pool } = require('pg');
 
 const app = express();
 app.use(cors());
@@ -8,47 +9,20 @@ app.use(express.json());
 
 const BOT_TOKEN = "8371336266:AAGeJ6iozisWnkkCmoTsPDt8RYoOgkvhroY";
 
-// قاعدة بيانات بسيطة
-let users = new Map();
-let transactions = [];
-let leaderboardData = { referral: [], earning: [] };
+// الاتصال بقاعدة البيانات PostgreSQL
+const pool = new Pool({
+    connectionString: "postgresql://postgres:EBEXkZAIxdoDqsUNjaYJNcjLdDvuHtSU@maglev.proxy.rlwy.net:12181/railway",
+    ssl: { rejectUnauthorized: false }
+});
 
-// إعدادات التطبيق
+// ⚙️ إعدادات التطبيق
 const config = {
-    adZoneId: "123456",
     adValue: 0.0005,
     dailyAdLimit: 10,
-    referralBonus: 0.001,
-    botUsername: "Aborabie777_bot",
-    minimumWithdrawReferrals: 0,
-    withdrawMethods: [
-        { name: "TON Wallet", min: 0.01 },
-        { name: "Binance", min: 0.05 }
-    ],
-    tasks: {
-        task1: { 
-            name: "Join Our Channel", 
-            reward: 0.001, 
-            url: "https://t.me/earnmoney174688",
-            icon: "https://img.icons8.com/ios-filled/100/group.png"
-        },
-        task2: { 
-            name: "Follow on Twitter", 
-            reward: 0.002, 
-            url: "https://twitter.com/example",
-            icon: "https://img.icons8.com/ios-filled/100/twitter.png"
-        }
-    },
-    links: {
-        link1: {
-            name: "Official Group",
-            url: "https://t.me/earnmoney174688",
-            icon: "https://img.icons8.com/ios-filled/100/group.png"
-        }
-    }
+    referralBonus: 0.001
 };
 
-// التحقق من توقيع تليجرام
+// 🔐 التحقق من توقيع تليجرام
 function validateTelegramInitData(initData) {
     try {
         const urlParams = new URLSearchParams(initData);
@@ -74,7 +48,7 @@ function validateTelegramInitData(initData) {
     }
 }
 
-// استخراج بيانات المستخدم
+// 👤 استخراج بيانات المستخدم
 function parseTelegramUser(initData) {
     try {
         const urlParams = new URLSearchParams(initData);
@@ -85,34 +59,87 @@ function parseTelegramUser(initData) {
     }
 }
 
-// تحديث اللوادر بورد
-function updateLeaderboards() {
-    leaderboardData.referral = Array.from(users.values())
-        .sort((a, b) => (b.referrals || 0) - (a.referrals || 0))
-        .slice(0, 10);
-
-    leaderboardData.earning = Array.from(users.values())
-        .sort((a, b) => (b.totalEarned || 0) - (a.totalEarned || 0))
-        .slice(0, 10);
+// 📊 جلب المستخدم من قاعدة البيانات (من جدول bot_users)
+async function getUserFromDB(userId) {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM bot_users WHERE telegram_id = $1',
+            [userId]
+        );
+        return result.rows[0];
+    } catch (error) {
+        console.error('Error getting user from DB:', error);
+        return null;
+    }
 }
 
-// الصفحة الرئيسية
+// ➕ إنشاء مستخدم جديد في قاعدة البيانات (في جدول bot_users)
+async function createUserInDB(userData) {
+    try {
+        const result = await pool.query(
+            `INSERT INTO bot_users 
+             (telegram_id, username, first_name, balance, earning_wallet) 
+             VALUES ($1, $2, $3, $4, $5) 
+             RETURNING *`,
+            [
+                userData.telegram_id,
+                userData.username,
+                userData.first_name,
+                userData.balance || 0,
+                userData.earning_wallet || 0
+            ]
+        );
+        return result.rows[0];
+    } catch (error) {
+        console.error('Error creating user in DB:', error);
+        return null;
+    }
+}
+
+// 🏠 الصفحة الرئيسية
 app.get('/', (req, res) => {
     res.json({ 
-        message: 'TON Rewards Backend is Running! 🚀',
-        status: 'Active',
-        users: users.size,
-        transactions: transactions.length
+        message: 'TON Rewards Backend with PostgreSQL - bot_users',
+        status: '✅ Connected to Database'
     });
 });
 
-// جلب الإعدادات
-app.get('/api/config', (req, res) => {
-    res.json({ success: true, config });
+// 👤 جلب بيانات المستخدم من قاعدة البيانات
+app.get('/api/user/:userId', async (req, res) => {
+    try {
+        const userId = req.params.userId;
+        
+        if (!validateTelegramInitData(req.query.initData)) {
+            return res.status(401).json({ error: 'Invalid security signature' });
+        }
+
+        const user = await getUserFromDB(userId);
+        
+        if (user) {
+            res.json({ 
+                success: true, 
+                user: {
+                    id: user.telegram_id,
+                    firstName: user.first_name,
+                    username: user.username,
+                    balance: parseFloat(user.balance),
+                    earningWallet: parseFloat(user.earning_wallet),
+                    dailyAdCount: user.daily_ad_count,
+                    totalEarned: parseFloat(user.total_earned),
+                    joinDate: user.created_at
+                }
+            });
+        } else {
+            res.status(404).json({ error: 'User not found' });
+        }
+    } catch (error) {
+        console.error('Get user error:', error);
+        res.status(500).json({ error: 'Failed to get user data' });
+    }
 });
 
-// تسجيل مستخدم جديد
-app.post('/api/register', (req, res) => {
+// 👤 تسجيل مستخدم جديد في قاعدة البيانات
+app.post('/api/register', async (req, res) => {
     try {
         const { initData, referralCode } = req.body;
         
@@ -126,51 +153,61 @@ app.post('/api/register', (req, res) => {
         }
 
         const userId = telegramUser.id.toString();
-
-        // إذا المستخدم موجود
-        if (users.has(userId)) {
-            const user = users.get(userId);
-            return res.json({ success: true, user });
+        
+        // التحقق إذا المستخدم موجود في قاعدة البيانات
+        let user = await getUserFromDB(userId);
+        
+        if (user) {
+            return res.json({ 
+                success: true, 
+                user: {
+                    id: user.telegram_id,
+                    firstName: user.first_name,
+                    username: user.username,
+                    balance: parseFloat(user.balance),
+                    earningWallet: parseFloat(user.earning_wallet),
+                    dailyAdCount: user.daily_ad_count,
+                    totalEarned: parseFloat(user.total_earned)
+                }
+            });
         }
 
-        // إنشاء مستخدم جديد
+        // إنشاء مستخدم جديد في قاعدة البيانات
         const newUser = {
-            id: userId,
-            firstName: telegramUser.first_name || 'User',
-            lastName: telegramUser.last_name || '',
+            telegram_id: userId,
             username: telegramUser.username || '',
-            photoUrl: '',
+            first_name: telegramUser.first_name || 'User',
             balance: 0,
-            earningWallet: 0,
-            referrals: 0,
-            totalEarned: 0,
-            dailyAdCount: 0,
-            lastAdDate: new Date().toISOString().split('T')[0],
-            lifetimeAdCount: 0,
-            completedTasks: {},
-            joinDate: new Date().toISOString(),
-            referredBy: referralCode || null
+            earning_wallet: 0
         };
 
-        users.set(userId, newUser);
-
-        // معالجة الإحالة
-        if (referralCode && users.has(referralCode) && referralCode !== userId) {
-            const referrer = users.get(referralCode);
-            referrer.balance += config.referralBonus;
-            referrer.referrals = (referrer.referrals || 0) + 1;
-            updateLeaderboards();
+        user = await createUserInDB(newUser);
+        
+        if (user) {
+            res.json({ 
+                success: true, 
+                user: {
+                    id: user.telegram_id,
+                    firstName: user.first_name,
+                    username: user.username,
+                    balance: parseFloat(user.balance),
+                    earningWallet: parseFloat(user.earning_wallet),
+                    dailyAdCount: user.daily_ad_count,
+                    totalEarned: parseFloat(user.total_earned)
+                }
+            });
+        } else {
+            res.status(500).json({ error: 'Failed to create user' });
         }
 
-        res.json({ success: true, user: newUser });
-
     } catch (error) {
+        console.error('Registration error:', error);
         res.status(500).json({ error: 'Registration failed' });
     }
 });
 
-// مشاهدة إعلان
-app.post('/api/watch-ad', (req, res) => {
+// 📺 مشاهدة إعلان وحفظ في قاعدة البيانات
+app.post('/api/watch-ad', async (req, res) => {
     try {
         const { initData } = req.body;
         
@@ -184,61 +221,53 @@ app.post('/api/watch-ad', (req, res) => {
         }
 
         const userId = telegramUser.id.toString();
-        const user = users.get(userId);
         
+        // جلب المستخدم من قاعدة البيانات
+        const user = await getUserFromDB(userId);
         if (!user) {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        // التحقق من التاريخ
+        // تحديث البيانات في قاعدة البيانات
+        const adReward = config.adValue;
         const today = new Date().toISOString().split('T')[0];
-        if (user.lastAdDate !== today) {
-            user.dailyAdCount = 0;
-            user.lastAdDate = today;
+        
+        const updateResult = await pool.query(
+            `UPDATE bot_users SET 
+                earning_wallet = COALESCE(earning_wallet, 0) + $1,
+                total_earned = COALESCE(total_earned, 0) + $1,
+                daily_ad_count = CASE 
+                    WHEN last_ad_date = $2 THEN COALESCE(daily_ad_count, 0) + 1 
+                    ELSE 1 
+                END,
+                last_ad_date = $2
+             WHERE telegram_id = $3 
+             RETURNING *`,
+            [adReward, today, userId]
+        );
+
+        const updatedUser = updateResult.rows[0];
+        
+        if (updatedUser) {
+            res.json({
+                success: true,
+                amount: adReward,
+                earningWallet: parseFloat(updatedUser.earning_wallet),
+                dailyRemaining: config.dailyAdLimit - (updatedUser.daily_ad_count || 0),
+                totalEarned: parseFloat(updatedUser.total_earned || 0)
+            });
+        } else {
+            res.status(500).json({ error: 'Failed to process ad' });
         }
-
-        // التحقق من الحد اليومي
-        if (user.dailyAdCount >= config.dailyAdLimit) {
-            return res.status(400).json({ error: 'Daily ad limit reached' });
-        }
-
-        // حساب قيمة الإعلان
-        const adValue = config.adValue;
-
-        // تحديث البيانات
-        user.earningWallet += adValue;
-        user.totalEarned += adValue;
-        user.dailyAdCount += 1;
-        user.lifetimeAdCount += 1;
-
-        // تسجيل العملية
-        const transactionId = 'txn_' + Date.now();
-        transactions.push({
-            id: transactionId,
-            userId: userId,
-            type: 'ad_reward',
-            amount: adValue,
-            timestamp: Date.now()
-        });
-
-        // تحديث اللوادر بورد
-        updateLeaderboards();
-
-        res.json({
-            success: true,
-            amount: adValue,
-            earningWallet: user.earningWallet,
-            dailyRemaining: config.dailyAdLimit - user.dailyAdCount,
-            transactionId: transactionId
-        });
 
     } catch (error) {
+        console.error('Watch ad error:', error);
         res.status(500).json({ error: 'Failed to process ad' });
     }
 });
 
-// تحويل المحفظة
-app.post('/api/move-to-balance', (req, res) => {
+// 💰 تحويل المحفظة إلى الرصيد
+app.post('/api/move-to-balance', async (req, res) => {
     try {
         const { initData } = req.body;
         
@@ -252,45 +281,49 @@ app.post('/api/move-to-balance', (req, res) => {
         }
 
         const userId = telegramUser.id.toString();
-        const user = users.get(userId);
+        const user = await getUserFromDB(userId);
         
         if (!user) {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        if (user.earningWallet < 0.001) {
+        const earningWallet = parseFloat(user.earning_wallet || 0);
+        if (earningWallet < 0.001) {
             return res.status(400).json({ error: 'Minimum 0.001 TON required' });
         }
 
-        user.balance += user.earningWallet;
-        user.earningWallet = 0;
+        // تحديث الرصيد في قاعدة البيانات
+        const updateResult = await pool.query(
+            `UPDATE bot_users SET 
+                balance = COALESCE(balance, 0) + $1,
+                earning_wallet = 0
+             WHERE telegram_id = $2 
+             RETURNING *`,
+            [earningWallet, userId]
+        );
 
-        res.json({
-            success: true,
-            newBalance: user.balance,
-            earningWallet: 0
-        });
+        const updatedUser = updateResult.rows[0];
+        
+        if (updatedUser) {
+            res.json({
+                success: true,
+                newBalance: parseFloat(updatedUser.balance),
+                earningWallet: 0
+            });
+        } else {
+            res.status(500).json({ error: 'Transfer failed' });
+        }
 
     } catch (error) {
+        console.error('Transfer error:', error);
         res.status(500).json({ error: 'Transfer failed' });
     }
 });
 
-// جلب اللوادر بورد
-app.get('/api/leaderboard/:type', (req, res) => {
+// 💸 سحب رصيد وحفظ في قاعدة البيانات
+app.post('/api/withdraw', async (req, res) => {
     try {
-        const type = req.params.type;
-        const data = leaderboardData[type] || [];
-        res.json({ success: true, data });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to load leaderboard' });
-    }
-});
-
-// المطالبة بمهمة
-app.post('/api/claim-task', (req, res) => {
-    try {
-        const { initData, taskId } = req.body;
+        const { initData, amount, walletAddress, method } = req.body;
         
         if (!validateTelegramInitData(initData)) {
             return res.status(401).json({ error: 'Invalid security signature' });
@@ -302,34 +335,54 @@ app.post('/api/claim-task', (req, res) => {
         }
 
         const userId = telegramUser.id.toString();
-        const user = users.get(userId);
-        const task = config.tasks[taskId];
+        const user = await getUserFromDB(userId);
         
-        if (!user || !task) {
-            return res.status(404).json({ error: 'User or task not found' });
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
         }
 
-        if (user.completedTasks[taskId]) {
-            return res.status(400).json({ error: 'Task already claimed' });
+        const userBalance = parseFloat(user.balance || 0);
+        if (userBalance < amount) {
+            return res.status(400).json({ error: 'Insufficient balance' });
         }
 
-        // منح المكافأة
-        user.balance += task.reward;
-        user.completedTasks[taskId] = true;
+        if (amount < 0.01) {
+            return res.status(400).json({ error: 'Minimum withdrawal is 0.01 TON' });
+        }
 
-        res.json({
-            success: true,
-            reward: task.reward,
-            newBalance: user.balance
-        });
+        // خصم المبلغ من الرصيد في قاعدة البيانات
+        const updateResult = await pool.query(
+            'UPDATE bot_users SET balance = COALESCE(balance, 0) - $1 WHERE telegram_id = $2 RETURNING *',
+            [amount, userId]
+        );
+
+        const updatedUser = updateResult.rows[0];
+        
+        if (updatedUser) {
+            // حفظ طلب السحب في قاعدة البيانات
+            await pool.query(
+                'INSERT INTO withdrawals (user_id, amount, wallet_address, method, status) VALUES ($1, $2, $3, $4, $5)',
+                [userId, amount, walletAddress, method, 'pending']
+            );
+
+            res.json({
+                success: true,
+                message: 'Withdrawal request submitted successfully',
+                newBalance: parseFloat(updatedUser.balance)
+            });
+        } else {
+            res.status(500).json({ error: 'Withdrawal failed' });
+        }
 
     } catch (error) {
-        res.status(500).json({ error: 'Failed to claim task' });
+        console.error('Withdrawal error:', error);
+        res.status(500).json({ error: 'Withdrawal failed' });
     }
 });
 
-// إبدأ السيرفر
+// 🚀 تشغيل السيرفر
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 TON Rewards Backend running on port ${PORT}`);
+    console.log(`🛡️ TON Rewards Backend running on port ${PORT}`);
+    console.log(`✅ Connected to PostgreSQL - bot_users table`);
 });
