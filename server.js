@@ -34,7 +34,7 @@ async function checkDatabaseConnection() {
     }
 }
 
-// 🔐 التحقق من توقيع تليجرام
+// 🔐 التحقق من توقيع تليجرام - الإصدار المصحح
 function validateTelegramInitData(initData) {
     try {
         console.log('=== بدء التحقق من التوقيع ===');
@@ -51,6 +51,8 @@ function validateTelegramInitData(initData) {
         console.log('🔓 initData بعد فك التشفير:', decodedInitData);
 
         const parsedData = querystring.parse(decodedInitData);
+        
+        // 🔥 استخدم hash بدل signature
         const hash = parsedData.hash;
         
         console.log('🔑 الهاش المستلم:', hash);
@@ -78,6 +80,8 @@ function validateTelegramInitData(initData) {
             .update(BOT_TOKEN)
             .digest();
         
+        console.log('🔑 البوت توكن المستخدم:', BOT_TOKEN);
+        
         // حساب الهاش
         const calculatedHash = crypto.createHmac('sha256', secretKey)
             .update(dataCheckString)
@@ -94,9 +98,16 @@ function validateTelegramInitData(initData) {
     }
 }
 
-// 👤 استخراج بيانات المستخدم
+// 👤 استخراج بيانات المستخدم - الإصدار المعدل
 function parseTelegramUser(initData) {
     try {
+        console.log('🔍 تحليل بيانات التليجرام...');
+        
+        if (!initData) {
+            console.log('❌ initData غير موجود');
+            return null;
+        }
+
         const decodedInitData = decodeURIComponent(initData);
         const parsedData = querystring.parse(decodedInitData);
         const userStr = parsedData.user;
@@ -110,9 +121,23 @@ function parseTelegramUser(initData) {
         const user = JSON.parse(userStr);
         console.log('👤 بيانات المستخدم المُستخرجة:', user);
         
-        return user && user.id ? user : null;
+        // 🔥 تحقق شامل من البيانات
+        if (!user || !user.id) {
+            console.log('❌ بيانات المستخدم غير صالحة - id مفقود');
+            return null;
+        }
+
+        console.log('✅ بيانات المستخدم صالحة:', {
+            id: user.id,
+            username: user.username,
+            first_name: user.first_name
+        });
+        
+        return user;
+        
     } catch (error) {
         console.error('❌ خطأ في تحليل بيانات المستخدم:', error);
+        console.error('🔍 initData الذي سبب الخطأ:', initData);
         return null;
     }
 }
@@ -140,41 +165,57 @@ async function getUserFromDB(userId) {
     }
 }
 
-// ➕ إنشاء مستخدم جديد في قاعدة البيانات
+// ➕ إنشاء مستخدم جديد في قاعدة البيانات - الإصدار المعدل
 async function createUserInDB(userData) {
     try {
-        console.log('🆕 إنشاء مستخدم جديد:', userData);
+        console.log('🆕 إنشاء مستخدم جديد - البيانات المستلمة:', userData);
         
-        // 🔥 تحقق من البيانات قبل الإدخال
+        // 🔥 تحقق شامل من البيانات
         if (!userData.telegram_id) {
-            console.log('❌ خطأ: telegram_id مفقود');
+            console.log('❌ خطأ: telegram_id مفقود أو undefined');
             return null;
         }
 
-        console.log('🔍 محاولة إدخال البيانات في الجدول...');
+        // تحويل telegram_id لـ string علشان نتأكد
+        const telegramId = userData.telegram_id.toString();
         
-        const result = await pool.query(
-            `INSERT INTO bot_users 
-             (telegram_id, username, first_name, balance, earning_wallet) 
-             VALUES ($1, $2, $3, $4, $5) 
-             RETURNING *`,
-            [
-                userData.telegram_id,
-                userData.username || '',
-                userData.first_name || 'مستخدم',
-                0,
-                0
-            ]
-        );
+        console.log('🔍 البيانات قبل الإدخال:', {
+            telegram_id: telegramId,
+            username: userData.username || 'لا يوجد',
+            first_name: userData.first_name || 'مستخدم'
+        });
+
+        // 🔥 استخدم query أبسط علشان نتأكد إنه شغال
+        const query = `
+            INSERT INTO bot_users 
+            (telegram_id, username, first_name, balance, earning_wallet) 
+            VALUES ($1, $2, $3, $4, $5) 
+            RETURNING *
+        `;
         
-        console.log('✅ تم إنشاء المستخدم بنجاح:', result.rows[0]);
+        const values = [
+            telegramId,
+            userData.username || '',
+            userData.first_name || 'مستخدم',
+            0,
+            0
+        ];
+
+        console.log('⚡ تنفيذ Query:', query);
+        console.log('📊 القيم:', values);
+
+        const result = await pool.query(query, values);
+        
+        console.log('✅ تم إنشاء المستخدم بنجاح - البيانات المعادة:', result.rows[0]);
         return result.rows[0];
+        
     } catch (error) {
         console.error('❌ خطأ في إنشاء المستخدم:', error.message);
-        console.error('🔍 تفاصيل الخطأ:', error);
+        console.error('🔍 كود الخطأ:', error.code);
+        console.error('🔍 تفاصيل الخطأ:', error.detail);
         
-        // 🔥 لو في duplicate error، جرب تجيب المستخدم الموجود
-        if (error.code === '23505') { // unique violation
+        // 🔥 إذا المستخدم موجود بالفعل، جيب بياناته
+        if (error.code === '23505') {
             console.log('⚠️  المستخدم موجود بالفعل، جاري جلب البيانات...');
             return await getUserFromDB(userData.telegram_id);
         }
@@ -340,6 +381,64 @@ app.post('/api/debug-telegram-data', async (req, res) => {
             signatureValid: isValid,
             user: userData
         });
+
+    } catch (error) {
+        console.error('❌ خطأ في فحص البيانات:', error);
+        res.status(500).json({ 
+            success: false,
+            error: error.message 
+        });
+    }
+});
+
+// 🔧 endpoint لفحص البيانات مباشرة من التليجرام
+app.get('/api/test-telegram-data/:userId', async (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const initData = req.query.initData;
+
+        console.log('🧪 فحص بيانات التليجرام مباشرة...');
+        console.log('👤 User ID:', userId);
+        console.log('📦 initData:', initData);
+
+        if (!initData) {
+            return res.json({ error: 'No initData provided' });
+        }
+
+        // التحقق من التوقيع
+        const isValid = validateTelegramInitData(initData);
+        console.log('🔐 التحقق من التوقيع:', isValid);
+
+        // استخراج بيانات المستخدم
+        const telegramUser = parseTelegramUser(initData);
+        console.log('👤 بيانات المستخدم المُستخرجة:', telegramUser);
+
+        // محاولة إنشاء المستخدم
+        if (telegramUser?.id) {
+            const newUser = {
+                telegram_id: telegramUser.id.toString(),
+                username: telegramUser.username || '',
+                first_name: telegramUser.first_name || 'مستخدم'
+            };
+
+            console.log('🆕 محاولة إنشاء مستخدم بالبيانات:', newUser);
+            const createdUser = await createUserInDB(newUser);
+            
+            res.json({
+                success: true,
+                signatureValid: isValid,
+                telegramUser: telegramUser,
+                createdUser: createdUser,
+                message: createdUser ? '✅ تم إنشاء المستخدم بنجاح' : '❌ فشل في إنشاء المستخدم'
+            });
+        } else {
+            res.json({
+                success: false,
+                signatureValid: isValid,
+                telegramUser: telegramUser,
+                error: 'لا توجد بيانات مستخدم صالحة'
+            });
+        }
 
     } catch (error) {
         console.error('❌ خطأ في فحص البيانات:', error);
@@ -538,7 +637,7 @@ app.get('/api/user/:userId', async (req, res) => {
     }
 });
 
-// 👤 تسجيل مستخدم جديد في قاعدة البيانات (يدوي - إذا محتاج)
+// 👤 تسجيل مستخدم جديد في قاعدة البيانات
 app.post('/api/register', async (req, res) => {
     try {
         const { initData } = req.body;
