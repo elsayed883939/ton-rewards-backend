@@ -25,6 +25,8 @@ const config = {
 // 🔐 التحقق من توقيع تليجرام
 function validateTelegramInitData(initData) {
     try {
+        if (!initData) return false;
+        
         const urlParams = new URLSearchParams(initData);
         const hash = urlParams.get('hash');
         const dataToCheck = [];
@@ -44,6 +46,7 @@ function validateTelegramInitData(initData) {
         
         return calculatedHash === hash;
     } catch (error) {
+        console.error('Validation error:', error);
         return false;
     }
 }
@@ -59,7 +62,7 @@ function parseTelegramUser(initData) {
     }
 }
 
-// 📊 جلب المستخدم من قاعدة البيانات (من جدول bot_users)
+// 📊 جلب المستخدم من قاعدة البيانات
 async function getUserFromDB(userId) {
     try {
         const result = await pool.query(
@@ -73,7 +76,7 @@ async function getUserFromDB(userId) {
     }
 }
 
-// ➕ إنشاء مستخدم جديد في قاعدة البيانات (في جدول bot_users)
+// ➕ إنشاء مستخدم جديد في قاعدة البيانات
 async function createUserInDB(userData) {
     try {
         const result = await pool.query(
@@ -100,7 +103,14 @@ async function createUserInDB(userData) {
 app.get('/', (req, res) => {
     res.json({ 
         message: 'TON Rewards Backend with PostgreSQL - bot_users',
-        status: '✅ Connected to Database'
+        status: '✅ Connected to Database',
+        endpoints: {
+            register: 'POST /api/register',
+            getUser: 'GET /api/user/:userId',
+            watchAd: 'POST /api/watch-ad',
+            moveToBalance: 'POST /api/move-to-balance',
+            withdraw: 'POST /api/withdraw'
+        }
     });
 });
 
@@ -108,8 +118,9 @@ app.get('/', (req, res) => {
 app.get('/api/user/:userId', async (req, res) => {
     try {
         const userId = req.params.userId;
+        const initData = req.query.initData;
         
-        if (!validateTelegramInitData(req.query.initData)) {
+        if (!validateTelegramInitData(initData)) {
             return res.status(401).json({ error: 'Invalid security signature' });
         }
 
@@ -122,10 +133,10 @@ app.get('/api/user/:userId', async (req, res) => {
                     id: user.telegram_id,
                     firstName: user.first_name,
                     username: user.username,
-                    balance: parseFloat(user.balance),
-                    earningWallet: parseFloat(user.earning_wallet),
-                    dailyAdCount: user.daily_ad_count,
-                    totalEarned: parseFloat(user.total_earned),
+                    balance: parseFloat(user.balance || 0),
+                    earningWallet: parseFloat(user.earning_wallet || 0),
+                    dailyAdCount: user.daily_ad_count || 0,
+                    totalEarned: parseFloat(user.total_earned || 0),
                     joinDate: user.created_at
                 }
             });
@@ -164,10 +175,10 @@ app.post('/api/register', async (req, res) => {
                     id: user.telegram_id,
                     firstName: user.first_name,
                     username: user.username,
-                    balance: parseFloat(user.balance),
-                    earningWallet: parseFloat(user.earning_wallet),
-                    dailyAdCount: user.daily_ad_count,
-                    totalEarned: parseFloat(user.total_earned)
+                    balance: parseFloat(user.balance || 0),
+                    earningWallet: parseFloat(user.earning_wallet || 0),
+                    dailyAdCount: user.daily_ad_count || 0,
+                    totalEarned: parseFloat(user.total_earned || 0)
                 }
             });
         }
@@ -192,8 +203,8 @@ app.post('/api/register', async (req, res) => {
                     username: user.username,
                     balance: parseFloat(user.balance),
                     earningWallet: parseFloat(user.earning_wallet),
-                    dailyAdCount: user.daily_ad_count,
-                    totalEarned: parseFloat(user.total_earned)
+                    dailyAdCount: user.daily_ad_count || 0,
+                    totalEarned: parseFloat(user.total_earned || 0)
                 }
             });
         } else {
@@ -228,9 +239,14 @@ app.post('/api/watch-ad', async (req, res) => {
             return res.status(404).json({ error: 'User not found' });
         }
 
+        // التحقق من الحد اليومي
+        const today = new Date().toISOString().split('T')[0];
+        if (user.last_ad_date === today && user.daily_ad_count >= config.dailyAdLimit) {
+            return res.status(400).json({ error: 'Daily ad limit reached' });
+        }
+
         // تحديث البيانات في قاعدة البيانات
         const adReward = config.adValue;
-        const today = new Date().toISOString().split('T')[0];
         
         const updateResult = await pool.query(
             `UPDATE bot_users SET 
@@ -380,9 +396,19 @@ app.post('/api/withdraw', async (req, res) => {
     }
 });
 
+// 🔧 endpoint للتست
+app.get('/api/test', (req, res) => {
+    res.json({ 
+        status: 'OK', 
+        message: 'Backend is working',
+        timestamp: new Date().toISOString()
+    });
+});
+
 // 🚀 تشغيل السيرفر
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🛡️ TON Rewards Backend running on port ${PORT}`);
     console.log(`✅ Connected to PostgreSQL - bot_users table`);
+    console.log(`🔐 Security: Telegram signature verification ENABLED`);
 });
