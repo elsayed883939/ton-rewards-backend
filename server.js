@@ -8,7 +8,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🎯 غير التوكن هنا علشان يطابق البوت اللي بتستخدمه
+// 🎯 البوت توكن
 const BOT_TOKEN = "8257278435:AAHbzrJxIHytXdD1sNftjC8DnDz18kdvbOU";
 
 // الاتصال بقاعدة البيانات
@@ -46,7 +46,11 @@ function validateTelegramInitData(initData) {
 
         console.log('📦 initData المستلم:', initData);
 
-        const parsedData = querystring.parse(initData);
+        // فك تشفير البيانات
+        const decodedInitData = decodeURIComponent(initData);
+        console.log('🔓 initData بعد فك التشفير:', decodedInitData);
+
+        const parsedData = querystring.parse(decodedInitData);
         const hash = parsedData.hash;
         
         console.log('🔑 الهاش المستلم:', hash);
@@ -93,7 +97,8 @@ function validateTelegramInitData(initData) {
 // 👤 استخراج بيانات المستخدم
 function parseTelegramUser(initData) {
     try {
-        const parsedData = querystring.parse(initData);
+        const decodedInitData = decodeURIComponent(initData);
+        const parsedData = querystring.parse(decodedInitData);
         const userStr = parsedData.user;
         
         if (!userStr) {
@@ -102,7 +107,7 @@ function parseTelegramUser(initData) {
         }
         
         // فك تشفير JSON
-        const user = JSON.parse(decodeURIComponent(userStr));
+        const user = JSON.parse(userStr);
         console.log('👤 بيانات المستخدم المُستخرجة:', user);
         
         return user && user.id ? user : null;
@@ -246,7 +251,126 @@ app.get('/api/setup-database', async (req, res) => {
     }
 });
 
-// 👤 جلب بيانات المستخدم من قاعدة البيانات
+// 🔍 endpoint لفحص البيانات الواردة من التليجرام
+app.post('/api/debug-telegram-data', async (req, res) => {
+    try {
+        const { initData } = req.body;
+        
+        console.log('=== فحص بيانات التليجرام ===');
+        console.log('📦 initData الخام:', initData);
+        
+        if (!initData) {
+            return res.json({ error: 'No initData provided' });
+        }
+
+        // فك التشفير
+        const decodedInitData = decodeURIComponent(initData);
+        console.log('🔓 initData بعد فك التشفير:', decodedInitData);
+
+        // تحليل البيانات
+        const parsedData = querystring.parse(decodedInitData);
+        console.log('📊 البيانات المحللة:', parsedData);
+
+        // استخراج بيانات المستخدم
+        let userData = null;
+        if (parsedData.user) {
+            userData = JSON.parse(parsedData.user);
+            console.log('👤 بيانات المستخدم:', userData);
+        }
+
+        // التحقق من التوقيع
+        const isValid = validateTelegramInitData(initData);
+        
+        res.json({
+            success: true,
+            initDataReceived: !!initData,
+            decodedInitData: decodedInitData,
+            parsedData: parsedData,
+            signatureValid: isValid,
+            user: userData
+        });
+
+    } catch (error) {
+        console.error('❌ خطأ في فحص البيانات:', error);
+        res.status(500).json({ 
+            success: false,
+            error: error.message 
+        });
+    }
+});
+
+// 👋 endpoint الترحيب بالمستخدم
+app.get('/api/welcome/:userId', async (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const initData = req.query.initData;
+
+        console.log(`👋 طلب ترحيب للمستخدم: ${userId}`);
+
+        if (!validateTelegramInitData(initData)) {
+            return res.status(401).json({ 
+                success: false,
+                error: 'Invalid security signature' 
+            });
+        }
+
+        const telegramUser = parseTelegramUser(initData);
+        
+        if (!telegramUser?.id) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Invalid user data' 
+            });
+        }
+
+        // تسجيل تلقائي أو جلب البيانات
+        let user = await getUserFromDB(userId);
+        let isNewUser = false;
+        
+        if (!user) {
+            console.log('🆕 تسجيل مستخدم جديد تلقائياً');
+            const newUser = {
+                telegram_id: telegramUser.id.toString(),
+                username: telegramUser.username || '',
+                first_name: telegramUser.first_name || 'مستخدم'
+            };
+            user = await createUserInDB(newUser);
+            isNewUser = true;
+        }
+
+        if (user) {
+            res.json({
+                success: true,
+                message: `🎉 أهلاً وسهلاً ${user.first_name}!`,
+                user: {
+                    id: user.telegram_id,
+                    firstName: user.first_name,
+                    username: user.username,
+                    balance: parseFloat(user.balance || 0),
+                    earningWallet: parseFloat(user.earning_wallet || 0),
+                    dailyAdCount: user.daily_ad_count || 0,
+                    totalEarned: parseFloat(user.total_earned || 0),
+                    photoUrl: telegramUser.photo_url // صورة البروفايل
+                },
+                isNewUser: isNewUser
+            });
+        } else {
+            res.status(500).json({ 
+                success: false,
+                error: 'Failed to welcome user' 
+            });
+        }
+
+    } catch (error) {
+        console.error('❌ خطأ في الترحيب:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: 'Welcome failed' 
+        });
+    }
+});
+
+// 👤 جلب بيانات المستخدم من قاعدة البيانات + تسجيل تلقائي
 app.get('/api/user/:userId', async (req, res) => {
     try {
         const userId = req.params.userId;
@@ -263,8 +387,33 @@ app.get('/api/user/:userId', async (req, res) => {
         }
 
         console.log('✅ تم التحقق بنجاح - متابعة الطلب');
-        const user = await getUserFromDB(userId);
         
+        // جلب المستخدم من قاعدة البيانات
+        let user = await getUserFromDB(userId);
+        let isNewUser = false;
+        
+        // 🔥 إذا المستخدم مش موجود، سجله تلقائياً
+        if (!user) {
+            console.log('🆕 المستخدم غير موجود - تسجيل تلقائي...');
+            
+            const telegramUser = parseTelegramUser(initData);
+            
+            if (telegramUser?.id) {
+                const newUser = {
+                    telegram_id: telegramUser.id.toString(),
+                    username: telegramUser.username || '',
+                    first_name: telegramUser.first_name || 'مستخدم'
+                };
+
+                user = await createUserInDB(newUser);
+                isNewUser = true;
+                
+                if (user) {
+                    console.log('✅ تم التسجيل التلقائي بنجاح');
+                }
+            }
+        }
+
         if (user) {
             console.log('✅ تم العثور على المستخدم');
             res.json({ 
@@ -277,13 +426,15 @@ app.get('/api/user/:userId', async (req, res) => {
                     earningWallet: parseFloat(user.earning_wallet || 0),
                     dailyAdCount: user.daily_ad_count || 0,
                     totalEarned: parseFloat(user.total_earned || 0)
-                }
+                },
+                isNewUser: isNewUser,
+                welcomeMessage: isNewUser ? `🎉 أهلاً وسهلاً ${user.first_name}!` : `مرحباً بعودتك ${user.first_name}!`
             });
         } else {
-            console.log('❌ المستخدم غير موجود - يجب التسجيل أولاً');
+            console.log('❌ فشل في التسجيل التلقائي');
             res.status(404).json({ 
                 success: false,
-                error: 'User not found - Please register first' 
+                error: 'User not found - Registration failed' 
             });
         }
     } catch (error) {
@@ -295,12 +446,13 @@ app.get('/api/user/:userId', async (req, res) => {
     }
 });
 
-// 👤 تسجيل مستخدم جديد في قاعدة البيانات
+// 👤 تسجيل مستخدم جديد في قاعدة البيانات (يدوي - إذا محتاج)
 app.post('/api/register', async (req, res) => {
     try {
         const { initData } = req.body;
 
         console.log('📥 طلب تسجيل مستخدم جديد');
+        console.log('📦 initData المستلم:', initData);
 
         if (!validateTelegramInitData(initData)) {
             console.log('❌ فشل التحقق - رفض التسجيل');
@@ -340,7 +492,8 @@ app.post('/api/register', async (req, res) => {
                     earningWallet: parseFloat(user.earning_wallet || 0),
                     dailyAdCount: user.daily_ad_count || 0,
                     totalEarned: parseFloat(user.total_earned || 0)
-                }
+                },
+                message: `مرحباً بعودتك ${user.first_name}!`
             });
         }
 
@@ -366,7 +519,8 @@ app.post('/api/register', async (req, res) => {
                     earningWallet: parseFloat(user.earning_wallet || 0),
                     dailyAdCount: user.daily_ad_count || 0,
                     totalEarned: parseFloat(user.total_earned || 0)
-                }
+                },
+                message: `🎉 أهلاً وسهلاً ${user.first_name}!`
             });
         } else {
             console.log('❌ فشل في إنشاء المستخدم');
