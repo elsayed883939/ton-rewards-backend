@@ -318,7 +318,7 @@ app.post('/api/register', async (req, res) => {
             console.log('❌ بيانات المستخدم غير صالحة');
             return res.status(400).json({ 
                 success: false,
-    AAGeJ6iozisWnkkCmoTsPDt8RYoOgkvhroYta' 
+                error: 'Invalid user data' 
             });
         }
 
@@ -672,7 +672,8 @@ app.post('/api/withdraw', async (req, res) => {
 
 // 🚀 تشغيل السيرفر
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+const HOST = process.env.HOST || '0.0.0.0';
+app.listen(PORT, HOST, () => {
     console.log(`🟢 TON Rewards Backend running on port ${PORT}`);
     console.log(`💰 Ad reward: ${config.adValue} TON`);
     console.log(`🔐 Telegram verification: ENABLED`);
