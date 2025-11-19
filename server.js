@@ -21,7 +21,7 @@ const config = {
     dailyAdLimit: 10
 };
 
-// 🔐 التحقق من توقيع تليجرام - معدل نهائي
+// 🔐 التحقق من توقيع تليجرام - الإصدار النهائي
 function validateTelegramInitData(initData) {
     try {
         console.log('🔐 بدء التحقق من التوقيع...');
@@ -31,25 +31,31 @@ function validateTelegramInitData(initData) {
             return false;
         }
 
-        // تنظيف initData من المسافات
-        const cleanInitData = initData.trim();
-        console.log('📦 initData بعد التنظيف:', cleanInitData.length, 'حرف');
+        // فك تشفير URL
+        const decodedInitData = decodeURIComponent(initData);
+        console.log('📦 initData بعد فك التشفير:', decodedInitData);
 
-        const urlParams = new URLSearchParams(cleanInitData);
+        const urlParams = new URLSearchParams(decodedInitData);
         const hash = urlParams.get('hash');
         
-        console.log('🔑 الهاش المستلم:', hash ? 'موجود' : 'مفقود');
-        console.log('👤 بيانات المستخدم:', urlParams.get('user') ? 'موجودة' : 'مفقودة');
+        console.log('🔑 الهاش المستلم:', hash);
+        console.log('📊 معلمات initData:');
+        urlParams.forEach((value, key) => {
+            if (key !== 'hash') {
+                console.log(`   ${key} = ${value}`);
+            }
+        });
 
         if (!hash) {
             console.log('❌ لا يوجد هاش في initData');
             return false;
         }
 
-        // بناء البيانات للتحقق
+        // بناء البيانات للتحقق - بالطريقة الصحيحة
         const dataToCheck = [];
         urlParams.forEach((value, key) => {
             if (key !== 'hash') {
+                // نستخدم القيمة كما هي بدون تعديل
                 dataToCheck.push(`${key}=${value}`);
             }
         });
@@ -58,14 +64,15 @@ function validateTelegramInitData(initData) {
         dataToCheck.sort();
         const dataCheckString = dataToCheck.join('\n');
         
-        console.log('📋 البيانات المُرتبة:', dataCheckString);
+        console.log('📋 البيانات المُرتبة للتحقق:');
+        console.log(dataCheckString);
 
-        // إنشاء المفتاح السري
+        // إنشاء المفتاح السري - بالطريقة الصحيحة
         const secretKey = crypto.createHmac('sha256', 'WebAppData')
             .update(BOT_TOKEN)
             .digest();
         
-        // حساب الهاش
+        // حساب الهاش - بالطريقة الصحيحة
         const calculatedHash = crypto.createHmac('sha256', secretKey)
             .update(dataCheckString)
             .digest('hex');
@@ -75,6 +82,13 @@ function validateTelegramInitData(initData) {
         
         const isValid = calculatedHash === hash;
         console.log('✅ نتيجة التحقق:', isValid ? 'صحيح' : 'خاطئ');
+        
+        if (!isValid) {
+            console.log('❌ الأسباب المحتملة:');
+            console.log('   - BOT_TOKEN غير صحيح');
+            console.log('   - البيانات غير مرتبة بشكل صحيح');
+            console.log('   - مشكلة في ترميز البيانات');
+        }
         
         return isValid;
     } catch (error) {
@@ -86,7 +100,8 @@ function validateTelegramInitData(initData) {
 // 👤 استخراج بيانات المستخدم
 function parseTelegramUser(initData) {
     try {
-        const urlParams = new URLSearchParams(initData);
+        const decodedInitData = decodeURIComponent(initData);
+        const urlParams = new URLSearchParams(decodedInitData);
         const userStr = urlParams.get('user');
         
         if (!userStr) {
@@ -94,7 +109,7 @@ function parseTelegramUser(initData) {
             return null;
         }
         
-        const user = JSON.parse(decodeURIComponent(userStr));
+        const user = JSON.parse(userStr);
         console.log('👤 بيانات المستخدم المُستخرجة:', user);
         
         return user && user.id ? user : null;
@@ -107,16 +122,11 @@ function parseTelegramUser(initData) {
 // 📊 جلب المستخدم من قاعدة البيانات
 async function getUserFromDB(userId) {
     try {
-        console.log('🗄️ جلب المستخدم من DB:', userId);
         const result = await pool.query(
             'SELECT * FROM bot_users WHERE telegram_id = $1',
             [userId]
         );
-        
-        const userExists = result.rows.length > 0;
-        console.log('✅ المستخدم موجود في DB:', userExists);
-        
-        return userExists ? result.rows[0] : null;
+        return result.rows[0];
     } catch (error) {
         console.error('❌ خطأ في جلب المستخدم من DB:', error.message);
         return null;
@@ -126,8 +136,6 @@ async function getUserFromDB(userId) {
 // ➕ إنشاء مستخدم جديد في قاعدة البيانات
 async function createUserInDB(userData) {
     try {
-        console.log('🆕 إنشاء مستخدم جديد:', userData.telegram_id);
-        
         const result = await pool.query(
             `INSERT INTO bot_users 
              (telegram_id, username, first_name, balance, earning_wallet) 
@@ -141,8 +149,6 @@ async function createUserInDB(userData) {
                 0
             ]
         );
-        
-        console.log('✅ تم إنشاء المستخدم بنجاح');
         return result.rows[0];
     } catch (error) {
         console.error('❌ خطأ في إنشاء المستخدم:', error.message);
@@ -159,28 +165,50 @@ app.get('/', (req, res) => {
     });
 });
 
+// 🔧 إضافة endpoint للتست
+app.get('/api/debug-initdata', (req, res) => {
+    const initData = req.query.initData;
+    
+    if (!initData) {
+        return res.json({ error: 'No initData provided' });
+    }
+
+    try {
+        const decodedInitData = decodeURIComponent(initData);
+        const urlParams = new URLSearchParams(decodedInitData);
+        
+        const debugInfo = {
+            rawInitData: initData,
+            decodedInitData: decodedInitData,
+            parameters: {}
+        };
+
+        urlParams.forEach((value, key) => {
+            debugInfo.parameters[key] = value;
+        });
+
+        res.json(debugInfo);
+    } catch (error) {
+        res.json({ error: error.message });
+    }
+});
+
 // 👤 جلب بيانات المستخدم من قاعدة البيانات
 app.get('/api/user/:userId', async (req, res) => {
     try {
         const userId = req.params.userId;
         const initData = req.query.initData;
-        
-        console.log(`📥 طلب جلب بيانات المستخدم: ${userId}`);
-        console.log('🔐 initData المُستلم:', initData ? 'موجود' : 'مفقود');
 
         if (!validateTelegramInitData(initData)) {
-            console.log('❌ فشل التحقق - رفض الطلب');
             return res.status(401).json({ 
                 success: false,
                 error: 'Invalid security signature' 
             });
         }
 
-        console.log('✅ تم التحقق بنجاح - متابعة الطلب');
         const user = await getUserFromDB(userId);
         
         if (user) {
-            console.log('✅ تم العثور على المستخدم');
             res.json({ 
                 success: true, 
                 user: {
@@ -194,7 +222,6 @@ app.get('/api/user/:userId', async (req, res) => {
                 }
             });
         } else {
-            console.log('❌ المستخدم غير موجود');
             res.status(404).json({ 
                 success: false,
                 error: 'User not found' 
@@ -213,23 +240,17 @@ app.get('/api/user/:userId', async (req, res) => {
 app.post('/api/register', async (req, res) => {
     try {
         const { initData } = req.body;
-        
-        console.log('📥 طلب تسجيل مستخدم جديد');
-        console.log('🔐 initData المُستلم:', initData ? 'موجود' : 'مفقود');
 
         if (!validateTelegramInitData(initData)) {
-            console.log('❌ فشل التحقق - رفض التسجيل');
             return res.status(401).json({ 
                 success: false,
                 error: 'Invalid security signature' 
             });
         }
 
-        console.log('✅ تم التحقق بنجاح - متابعة التسجيل');
         const telegramUser = parseTelegramUser(initData);
         
         if (!telegramUser?.id) {
-            console.log('❌ بيانات المستخدم غير صالحة');
             return res.status(400).json({ 
                 success: false,
                 error: 'Invalid user data' 
@@ -237,13 +258,11 @@ app.post('/api/register', async (req, res) => {
         }
 
         const userId = telegramUser.id.toString();
-        console.log(`👤 معالجة المستخدم: ${userId}`);
         
         // التحقق إذا المستخدم موجود في قاعدة البيانات
         let user = await getUserFromDB(userId);
         
         if (user) {
-            console.log('✅ المستخدم موجود بالفعل');
             return res.json({ 
                 success: true, 
                 user: {
@@ -259,7 +278,6 @@ app.post('/api/register', async (req, res) => {
         }
 
         // إنشاء مستخدم جديد في قاعدة البيانات
-        console.log('🆕 إنشاء مستخدم جديد...');
         const newUser = {
             telegram_id: userId,
             username: telegramUser.username || '',
@@ -269,7 +287,6 @@ app.post('/api/register', async (req, res) => {
         user = await createUserInDB(newUser);
         
         if (user) {
-            console.log('✅ تم إنشاء المستخدم بنجاح');
             res.json({ 
                 success: true, 
                 user: {
@@ -283,7 +300,6 @@ app.post('/api/register', async (req, res) => {
                 }
             });
         } else {
-            console.log('❌ فشل في إنشاء المستخدم');
             res.status(500).json({ 
                 success: false,
                 error: 'Failed to create user' 
@@ -303,23 +319,17 @@ app.post('/api/register', async (req, res) => {
 app.post('/api/watch-ad', async (req, res) => {
     try {
         const { initData } = req.body;
-        
-        console.log('📥 طلب مشاهدة إعلان');
-        console.log('🔐 initData المُستلم:', initData ? 'موجود' : 'مفقود');
 
         if (!validateTelegramInitData(initData)) {
-            console.log('❌ فشل التحقق - رفض مشاهدة الإعلان');
             return res.status(401).json({ 
                 success: false,
                 error: 'Invalid security signature' 
             });
         }
 
-        console.log('✅ تم التحقق بنجاح - متابعة مشاهدة الإعلان');
         const telegramUser = parseTelegramUser(initData);
         
         if (!telegramUser?.id) {
-            console.log('❌ بيانات المستخدم غير صالحة');
             return res.status(400).json({ 
                 success: false,
                 error: 'Invalid user data' 
@@ -327,12 +337,10 @@ app.post('/api/watch-ad', async (req, res) => {
         }
 
         const userId = telegramUser.id.toString();
-        console.log(`👤 معالجة مشاهدة إعلان للمستخدم: ${userId}`);
         
         // جلب المستخدم من قاعدة البيانات
         const user = await getUserFromDB(userId);
         if (!user) {
-            console.log('❌ المستخدم غير موجود');
             return res.status(404).json({ 
                 success: false,
                 error: 'User not found' 
@@ -342,7 +350,6 @@ app.post('/api/watch-ad', async (req, res) => {
         // التحقق من الحد اليومي
         const today = new Date().toISOString().split('T')[0];
         if (user.last_ad_date === today && user.daily_ad_count >= config.dailyAdLimit) {
-            console.log('❌ تم الوصول للحد اليومي');
             return res.status(400).json({ 
                 success: false,
                 error: 'Daily ad limit reached' 
@@ -351,7 +358,6 @@ app.post('/api/watch-ad', async (req, res) => {
 
         // تحديث البيانات في قاعدة البيانات
         const adReward = config.adValue;
-        console.log(`💰 مكافأة الإعلان: ${adReward} TON`);
         
         const updateResult = await pool.query(
             `UPDATE bot_users SET 
@@ -370,7 +376,6 @@ app.post('/api/watch-ad', async (req, res) => {
         const updatedUser = updateResult.rows[0];
         
         if (updatedUser) {
-            console.log('✅ تمت مشاهدة الإعلان بنجاح');
             res.json({
                 success: true,
                 amount: adReward,
@@ -379,7 +384,6 @@ app.post('/api/watch-ad', async (req, res) => {
                 totalEarned: parseFloat(updatedUser.total_earned || 0)
             });
         } else {
-            console.log('❌ فشل في معالجة الإعلان');
             res.status(500).json({ 
                 success: false,
                 error: 'Failed to process ad' 
@@ -399,23 +403,17 @@ app.post('/api/watch-ad', async (req, res) => {
 app.post('/api/move-to-balance', async (req, res) => {
     try {
         const { initData } = req.body;
-        
-        console.log('📥 طلب تحويل الرصيد');
-        console.log('🔐 initData المُستلم:', initData ? 'موجود' : 'مفقود');
 
         if (!validateTelegramInitData(initData)) {
-            console.log('❌ فشل التحقق - رفض التحويل');
             return res.status(401).json({ 
                 success: false,
                 error: 'Invalid security signature' 
             });
         }
 
-        console.log('✅ تم التحقق بنجاح - متابعة التحويل');
         const telegramUser = parseTelegramUser(initData);
         
         if (!telegramUser?.id) {
-            console.log('❌ بيانات المستخدم غير صالحة');
             return res.status(400).json({ 
                 success: false,
                 error: 'Invalid user data' 
@@ -423,12 +421,9 @@ app.post('/api/move-to-balance', async (req, res) => {
         }
 
         const userId = telegramUser.id.toString();
-        console.log(`👤 معالجة تحويل الرصيد للمستخدم: ${userId}`);
-        
         const user = await getUserFromDB(userId);
         
         if (!user) {
-            console.log('❌ المستخدم غير موجود');
             return res.status(404).json({ 
                 success: false,
                 error: 'User not found' 
@@ -436,10 +431,7 @@ app.post('/api/move-to-balance', async (req, res) => {
         }
 
         const earningWallet = parseFloat(user.earning_wallet || 0);
-        console.log(`💰 الرصيد المتاح للتحويل: ${earningWallet} TON`);
-        
         if (earningWallet < 0.001) {
-            console.log('❌ الرصيد غير كافي للتحويل');
             return res.status(400).json({ 
                 success: false,
                 error: 'Minimum 0.001 TON required' 
@@ -459,14 +451,12 @@ app.post('/api/move-to-balance', async (req, res) => {
         const updatedUser = updateResult.rows[0];
         
         if (updatedUser) {
-            console.log('✅ تم تحويل الرصيد بنجاح');
             res.json({
                 success: true,
                 newBalance: parseFloat(updatedUser.balance || 0),
                 earningWallet: 0
             });
         } else {
-            console.log('❌ فشل في تحويل الرصيد');
             res.status(500).json({ 
                 success: false,
                 error: 'Transfer failed' 
@@ -486,25 +476,17 @@ app.post('/api/move-to-balance', async (req, res) => {
 app.post('/api/withdraw', async (req, res) => {
     try {
         const { initData, amount, walletAddress, method = 'TON Wallet' } = req.body;
-        
-        console.log('📥 طلب سحب رصيد');
-        console.log('🔐 initData المُستلم:', initData ? 'موجود' : 'مفقود');
-        console.log('💰 المبلغ المطلوب:', amount);
-        console.log('🏦 عنوان المحفظة:', walletAddress);
 
         if (!validateTelegramInitData(initData)) {
-            console.log('❌ فشل التحقق - رفض السحب');
             return res.status(401).json({ 
                 success: false,
                 error: 'Invalid security signature' 
             });
         }
 
-        console.log('✅ تم التحقق بنجاح - متابعة السحب');
         const telegramUser = parseTelegramUser(initData);
         
         if (!telegramUser?.id) {
-            console.log('❌ بيانات المستخدم غير صالحة');
             return res.status(400).json({ 
                 success: false,
                 error: 'Invalid user data' 
@@ -512,12 +494,9 @@ app.post('/api/withdraw', async (req, res) => {
         }
 
         const userId = telegramUser.id.toString();
-        console.log(`👤 معالجة سحب رصيد للمستخدم: ${userId}`);
-        
         const user = await getUserFromDB(userId);
         
         if (!user) {
-            console.log('❌ المستخدم غير موجود');
             return res.status(404).json({ 
                 success: false,
                 error: 'User not found' 
@@ -525,10 +504,7 @@ app.post('/api/withdraw', async (req, res) => {
         }
 
         const userBalance = parseFloat(user.balance || 0);
-        console.log(`💰 الرصيد الحالي: ${userBalance} TON`);
-        
         if (userBalance < amount) {
-            console.log('❌ الرصيد غير كافي');
             return res.status(400).json({ 
                 success: false,
                 error: 'Insufficient balance' 
@@ -536,7 +512,6 @@ app.post('/api/withdraw', async (req, res) => {
         }
 
         if (amount < 0.01) {
-            console.log('❌ المبلغ أقل من الحد الأدنى');
             return res.status(400).json({ 
                 success: false,
                 error: 'Minimum withdrawal is 0.01 TON' 
@@ -544,7 +519,6 @@ app.post('/api/withdraw', async (req, res) => {
         }
 
         if (!walletAddress) {
-            console.log('❌ عنوان المحفظة مطلوب');
             return res.status(400).json({ 
                 success: false,
                 error: 'Wallet address required' 
@@ -566,14 +540,12 @@ app.post('/api/withdraw', async (req, res) => {
                 [userId, amount, walletAddress, method, 'pending']
             );
 
-            console.log('✅ تم تقديم طلب السحب بنجاح');
             res.json({
                 success: true,
                 message: 'Withdrawal request submitted successfully',
                 newBalance: parseFloat(updatedUser.balance || 0)
             });
         } else {
-            console.log('❌ فشل في معالجة السحب');
             res.status(500).json({ 
                 success: false,
                 error: 'Withdrawal failed' 
