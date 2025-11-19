@@ -129,6 +129,10 @@ async function getUserFromDB(userId) {
         const userExists = result.rows.length > 0;
         console.log('✅ المستخدم موجود في DB:', userExists);
         
+        if (userExists) {
+            console.log('📊 بيانات المستخدم:', result.rows[0]);
+        }
+        
         return userExists ? result.rows[0] : null;
     } catch (error) {
         console.error('❌ خطأ في جلب المستخدم من DB:', error.message);
@@ -140,6 +144,14 @@ async function getUserFromDB(userId) {
 async function createUserInDB(userData) {
     try {
         console.log('🆕 إنشاء مستخدم جديد:', userData);
+        
+        // 🔥 تحقق من البيانات قبل الإدخال
+        if (!userData.telegram_id) {
+            console.log('❌ خطأ: telegram_id مفقود');
+            return null;
+        }
+
+        console.log('🔍 محاولة إدخال البيانات في الجدول...');
         
         const result = await pool.query(
             `INSERT INTO bot_users 
@@ -159,6 +171,14 @@ async function createUserInDB(userData) {
         return result.rows[0];
     } catch (error) {
         console.error('❌ خطأ في إنشاء المستخدم:', error.message);
+        console.error('🔍 تفاصيل الخطأ:', error);
+        
+        // 🔥 لو في duplicate error، جرب تجيب المستخدم الموجود
+        if (error.code === '23505') { // unique violation
+            console.log('⚠️  المستخدم موجود بالفعل، جاري جلب البيانات...');
+            return await getUserFromDB(userData.telegram_id);
+        }
+        
         return null;
     }
 }
@@ -172,6 +192,37 @@ app.get('/', async (req, res) => {
         status: dbConnected ? '✅ متصل بقاعدة البيانات' : '❌ خطأ في قاعدة البيانات',
         timestamp: new Date().toISOString()
     });
+});
+
+// 🔧 endpoint لفحص الاتصال بالداتابيز
+app.get('/api/check-connection', async (req, res) => {
+    try {
+        const dbResult = await pool.query('SELECT NOW() as time, version() as version');
+        const tablesResult = await pool.query(`
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_schema = 'public'
+        `);
+        
+        res.json({
+            success: true,
+            database: {
+                connected: true,
+                time: dbResult.rows[0].time,
+                version: dbResult.rows[0].version
+            },
+            tables: tablesResult.rows,
+            total_tables: tablesResult.rows.length
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            database: {
+                connected: false
+            }
+        });
+    }
 });
 
 // 🔍 endpoint علشان نشوف الجداول الموجودة
@@ -299,6 +350,43 @@ app.post('/api/debug-telegram-data', async (req, res) => {
     }
 });
 
+// 🔧 endpoint لإنشاء مستخدم يدوي للتجربة
+app.post('/api/create-test-user', async (req, res) => {
+    try {
+        const { userId, username, firstName } = req.body;
+        
+        console.log('🧪 تجربة إنشاء مستخدم يدوي:', { userId, username, firstName });
+        
+        const userData = {
+            telegram_id: userId.toString(),
+            username: username || 'test_user',
+            first_name: firstName || 'Test User'
+        };
+
+        const user = await createUserInDB(userData);
+        
+        if (user) {
+            res.json({ 
+                success: true,
+                message: 'تم إنشاء المستخدم بنجاح',
+                user: user
+            });
+        } else {
+            res.status(500).json({ 
+                success: false,
+                error: 'فشل في إنشاء المستخدم' 
+            });
+        }
+
+    } catch (error) {
+        console.error('❌ خطأ في التجربة:', error);
+        res.status(500).json({ 
+            success: false,
+            error: error.message 
+        });
+    }
+});
+
 // 👋 endpoint الترحيب بالمستخدم
 app.get('/api/welcome/:userId', async (req, res) => {
     try {
@@ -405,11 +493,15 @@ app.get('/api/user/:userId', async (req, res) => {
                     first_name: telegramUser.first_name || 'مستخدم'
                 };
 
+                console.log('🔍 قبل createUserInDB - userData:', newUser);
                 user = await createUserInDB(newUser);
+                console.log('🔍 بعد createUserInDB - النتيجة:', user);
                 isNewUser = true;
                 
                 if (user) {
                     console.log('✅ تم التسجيل التلقائي بنجاح');
+                } else {
+                    console.log('❌ فشل في التسجيل التلقائي');
                 }
             }
         }
@@ -505,8 +597,10 @@ app.post('/api/register', async (req, res) => {
             first_name: telegramUser.first_name || 'مستخدم'
         };
 
+        console.log('🔍 قبل createUserInDB - userData:', newUser);
         user = await createUserInDB(newUser);
-        
+        console.log('🔍 بعد createUserInDB - النتيجة:', user);
+
         if (user) {
             console.log('✅ تم إنشاء المستخدم بنجاح');
             res.json({ 
@@ -523,18 +617,19 @@ app.post('/api/register', async (req, res) => {
                 message: `🎉 أهلاً وسهلاً ${user.first_name}!`
             });
         } else {
-            console.log('❌ فشل في إنشاء المستخدم');
+            console.log('❌ فشل في إنشاء المستخدم - لم يتم إرجاع بيانات');
             res.status(500).json({ 
                 success: false,
-                error: 'Failed to create user' 
+                error: 'Failed to create user - no data returned' 
             });
         }
 
     } catch (error) {
         console.error('❌ خطأ في التسجيل:', error.message);
+        console.error('Stack trace:', error.stack);
         res.status(500).json({ 
             success: false,
-            error: 'Registration failed' 
+            error: 'Registration failed: ' + error.message 
         });
     }
 });
