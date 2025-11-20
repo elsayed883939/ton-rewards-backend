@@ -234,6 +234,29 @@ app.get('/api/setup-database', async (req, res) => {
             )
         `);
 
+        // إنشاء جدول الإشعارات
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS notifications (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                message TEXT NOT NULL,
+                sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status VARCHAR(50) DEFAULT 'sent'
+            )
+        `);
+
+        // إنشاء جدول إجراءات المسؤول
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS admin_actions (
+                id SERIAL PRIMARY KEY,
+                admin_id VARCHAR(255) NOT NULL,
+                action_type VARCHAR(255) NOT NULL,
+                target_user BIGINT,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
         // إضافة الإعدادات الافتراضية
         await pool.query(`
             INSERT INTO bot_settings (setting_key, setting_value, description) 
@@ -770,7 +793,7 @@ app.get('/api/admin/dashboard', async (req, res) => {
     }
 });
 
-// 👥 إدارة المستخدمين
+// 👥 إدارة المستخدمين - النسخة المحسنة
 app.get('/api/admin/users', async (req, res) => {
     try {
         const { admin_key, page = 1, limit = 20, search, status } = req.query;
@@ -785,21 +808,29 @@ app.get('/api/admin/users', async (req, res) => {
         let query = `
             SELECT 
                 telegram_id, username, first_name, 
-                balance, earning_wallet, total_earned, total_ads_watched,
-                daily_ad_count, last_ad_date, status, created_at, last_active
+                COALESCE(balance, 0) as balance, 
+                COALESCE(earning_wallet, 0) as earning_wallet, 
+                COALESCE(total_earned, 0) as total_earned, 
+                COALESCE(total_ads_watched, 0) as total_ads_watched,
+                COALESCE(daily_ad_count, 0) as daily_ad_count, 
+                last_ad_date, 
+                COALESCE(status, 'active') as status, 
+                created_at, 
+                COALESCE(last_active, created_at) as last_active
             FROM bot_users 
         `;
+        
         let countQuery = `SELECT COUNT(*) FROM bot_users `;
         let queryParams = [];
         let conditions = [];
 
-        if (search) {
+        if (search && search.trim() !== '') {
             conditions.push(`(first_name ILIKE $${queryParams.length + 1} OR username ILIKE $${queryParams.length + 1} OR telegram_id::TEXT ILIKE $${queryParams.length + 1})`);
             queryParams.push(`%${search}%`);
         }
 
         if (status && status !== 'all') {
-            conditions.push(`status = $${queryParams.length + 1}`);
+            conditions.push(`COALESCE(status, 'active') = $${queryParams.length + 1}`);
             queryParams.push(status);
         }
 
@@ -811,7 +842,7 @@ app.get('/api/admin/users', async (req, res) => {
 
         const offset = (page - 1) * limit;
         query += ` ORDER BY created_at DESC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
-        queryParams.push(limit, offset);
+        queryParams.push(parseInt(limit), offset);
 
         const users = await pool.query(query, queryParams);
         const countResult = await pool.query(countQuery, queryParams.slice(0, conditions.length > 0 ? queryParams.length - 2 : 0));
@@ -822,14 +853,14 @@ app.get('/api/admin/users', async (req, res) => {
             users: users.rows.map(u => ({
                 id: u.telegram_id,
                 username: u.username || 'لا يوجد',
-                firstName: u.first_name,
+                firstName: u.first_name || 'مستخدم',
                 balance: parseFloat(u.balance),
                 earningWallet: parseFloat(u.earning_wallet),
                 totalEarned: parseFloat(u.total_earned),
                 totalAdsWatched: u.total_ads_watched || 0,
-                dailyAdCount: u.daily_ad_count,
+                dailyAdCount: u.daily_ad_count || 0,
                 lastAdDate: u.last_ad_date,
-                status: u.status,
+                status: u.status || 'active',
                 joinedAt: u.created_at,
                 lastActive: u.last_active
             })),
@@ -845,7 +876,7 @@ app.get('/api/admin/users', async (req, res) => {
         console.error('❌ خطأ في جلب المستخدمين:', error.message);
         res.status(500).json({ 
             success: false,
-            error: 'Failed to get users' 
+            error: 'Failed to get users: ' + error.message 
         });
     }
 });
@@ -1032,7 +1063,7 @@ app.post('/api/admin/users/:userId/add-balance', async (req, res) => {
         await pool.query(
             `INSERT INTO admin_actions (admin_id, action_type, target_user, details) 
              VALUES ($1, $2, $3, $4)`,
-            ['system', 'add_balance', userId, `Added ${addAmount} TON to user balance. Note: ${note || 'No note'}`]
+            ['admin', 'add_balance', userId, `Added ${addAmount} TON to user balance. Note: ${note || 'No note'}`]
         );
 
         res.json({
@@ -1087,7 +1118,7 @@ app.post('/api/admin/users/:userId/ban', async (req, res) => {
         await pool.query(
             `INSERT INTO admin_actions (admin_id, action_type, target_user, details) 
              VALUES ($1, $2, $3, $4)`,
-            ['system', 'user_ban', userId, `${action} user. Reason: ${reason || 'No reason provided'}`]
+            ['admin', 'user_ban', userId, `${action} user. Reason: ${reason || 'No reason provided'}`]
         );
 
         res.json({
@@ -1332,7 +1363,7 @@ app.post('/api/admin/settings', async (req, res) => {
     }
 });
 
-// 📨 إرسال رسالة للمستخدمين
+// 📨 إرسال رسالة للمستخدمين - النسخة المحسنة
 app.post('/api/admin/broadcast', async (req, res) => {
     try {
         const { admin_key, message, target, user_id } = req.body;
@@ -1373,8 +1404,7 @@ app.post('/api/admin/broadcast', async (req, res) => {
             });
         }
 
-        // هنا يمكنك إضافة كود لإرسال الرسائل عبر بوت تليجرام
-        // هذا مثال بسيط للتخزين في قاعدة البيانات
+        // تخزين الإشعارات في قاعدة البيانات
         for (const user of users) {
             await pool.query(
                 `INSERT INTO notifications (user_id, message, sent_at) 
@@ -1387,7 +1417,7 @@ app.post('/api/admin/broadcast', async (req, res) => {
         await pool.query(
             `INSERT INTO admin_actions (admin_id, action_type, details) 
              VALUES ($1, $2, $3)`,
-            ['system', 'broadcast', `Sent message to ${users.length} users: ${message.substring(0, 100)}...`]
+            ['admin', 'broadcast', `Sent message to ${users.length} users: ${message.substring(0, 100)}...`]
         );
 
         res.json({
@@ -1400,7 +1430,7 @@ app.post('/api/admin/broadcast', async (req, res) => {
         console.error('❌ خطأ في إرسال الرسالة:', error.message);
         res.status(500).json({ 
             success: false,
-            error: 'Failed to send message' 
+            error: 'Failed to send message: ' + error.message 
         });
     }
 });
@@ -1468,6 +1498,43 @@ app.get('/api/admin/analytics', async (req, res) => {
         res.status(500).json({ 
             success: false,
             error: 'Failed to get analytics' 
+        });
+    }
+});
+
+// 🔧 إصلاح قاعدة البيانات
+app.get('/api/fix-database', async (req, res) => {
+    try {
+        // إضافة الأعمدة الناقصة لجدول bot_users
+        await pool.query(`
+            DO $$ 
+            BEGIN
+                -- إضافة العمود إذا لم يكن موجوداً
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                              WHERE table_name='bot_users' AND column_name='total_ads_watched') THEN
+                    ALTER TABLE bot_users ADD COLUMN total_ads_watched INTEGER DEFAULT 0;
+                END IF;
+                
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                              WHERE table_name='bot_users' AND column_name='status') THEN
+                    ALTER TABLE bot_users ADD COLUMN status VARCHAR(50) DEFAULT 'active';
+                END IF;
+                
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                              WHERE table_name='bot_users' AND column_name='last_active') THEN
+                    ALTER TABLE bot_users ADD COLUMN last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+                END IF;
+            END $$;
+        `);
+
+        res.json({
+            success: true,
+            message: 'تم إصلاح قاعدة البيانات بنجاح'
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
         });
     }
 });
