@@ -7,14 +7,24 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
 const app = express();
-app.use(cors());
+
+// 🔧 إصلاح CORS - أضف هذا قبل أي routes
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
 
-// 🔐 إعدادات الأمان
-const BOT_TOKEN = process.env.BOT_TOKEN || "8257278435:AAHbzrJxIHytXdD1sNftjC8DnDz18kdvbOU";
-const JWT_SECRET = process.env.JWT_SECRET || "ton_rewards_secret_key_2024";
-const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
-const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH || "$2a$10$8K1p/a0dRTlR0d.kY0ZQY.ZZ5x3H3zB5R5QY5x5r5r5r5r5r5r5r5";
+// معالجة طلبات OPTIONS
+app.options('*', cors());
+
+// 🔐 إعدادات الأمان - بيانات الدخول المباشرة للتجربة
+const BOT_TOKEN = "8257278435:AAHbzrJxIHytXdD1sNftjC8DnDz18kdvbOU";
+const JWT_SECRET = "ton_rewards_secret_key_2024";
+const ADMIN_USERNAME = "admin";
+const ADMIN_PASSWORD = "admin123"; // كلمة المرور المباشرة للتجربة
 
 // الاتصال بقاعدة البيانات
 const pool = new Pool({
@@ -155,10 +165,12 @@ async function createUserInDB(userData) {
     }
 }
 
-// 🔑 تسجيل دخول المسؤول
+// 🔑 تسجيل دخول المسؤول - الإصدار المبسط
 app.post('/api/admin/login', async (req, res) => {
     try {
         const { username, password } = req.body;
+        
+        console.log('🔐 محاولة تسجيل دخول:', { username });
         
         if (!username || !password) {
             return res.status(400).json({ 
@@ -167,9 +179,10 @@ app.post('/api/admin/login', async (req, res) => {
             });
         }
 
-        // في الإنتاج، استخدم مقارنة آمنة مع الهاش المخزن
-        const isValid = username === ADMIN_USERNAME && 
-                       await bcrypt.compare(password, ADMIN_PASSWORD_HASH);
+        // تحقق مباشر من اسم المستخدم وكلمة المرور
+        const isValid = username === ADMIN_USERNAME && password === ADMIN_PASSWORD;
+
+        console.log('✅ نتيجة التحقق:', isValid);
 
         if (isValid) {
             const token = jwt.sign(
@@ -190,9 +203,10 @@ app.post('/api/admin/login', async (req, res) => {
             });
         }
     } catch (error) {
+        console.error('❌ خطأ في تسجيل الدخول:', error);
         res.status(500).json({ 
             success: false,
-            error: 'فشل في تسجيل الدخول' 
+            error: 'فشل في تسجيل الدخول: ' + error.message 
         });
     }
 });
@@ -219,6 +233,16 @@ app.get('/api/admin/verify', async (req, res) => {
             error: 'فشل في التحقق' 
         });
     }
+});
+
+// 🔧 نقطة فحص السيرفر
+app.get('/api/health', (req, res) => {
+    res.json({
+        success: true,
+        message: 'السيرفر يعمل بشكل طبيعي',
+        timestamp: new Date().toISOString(),
+        version: '1.0.0'
+    });
 });
 
 // 🏠 الصفحة الرئيسية
@@ -1598,5 +1622,7 @@ app.listen(PORT, HOST, () => {
     console.log(`💰 Ad reward: ${config.adValue} TON`);
     console.log(`💸 Min withdrawal: ${config.minWithdrawal} TON`);
     console.log(`🔐 Admin username: ${ADMIN_USERNAME}`);
-    console.log(`🔑 JWT Secret: ${JWT_SECRET ? '✅ Set' : '❌ Not set'}`);
+    console.log(`🔑 Admin password: ${ADMIN_PASSWORD}`);
+    console.log(`🌐 Health check: http://localhost:${PORT}/api/health`);
+    console.log(`🌐 Server URL: https://ton-rewards-backend-production-5e56.up.railway.app`);
 });
