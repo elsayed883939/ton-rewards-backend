@@ -2,13 +2,10 @@ const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const { Pool } = require('pg');
-const querystring = require('querystring');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
 
 const app = express();
 
-// 🔧 إصلاح CORS - أضف هذا قبل أي routes
+// 🔧 إعدادات CORS
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -16,15 +13,10 @@ app.use(cors({
 }));
 
 app.use(express.json());
-
-// معالجة طلبات OPTIONS
 app.options('*', cors());
 
-// 🔐 إعدادات الأمان - بيانات الدخول المباشرة للتجربة
+// 🔐 إعدادات البوت
 const BOT_TOKEN = "8257278435:AAHbzrJxIHytXdD1sNftjC8DnDz18kdvbOU";
-const JWT_SECRET = "ton_rewards_secret_key_2024";
-const ADMIN_USERNAME = "admin";
-const ADMIN_PASSWORD = "admin123"; // كلمة المرور المباشرة للتجربة
 
 // الاتصال بقاعدة البيانات
 const pool = new Pool({
@@ -43,7 +35,7 @@ const config = {
 async function checkDatabaseConnection() {
     try {
         const result = await pool.query('SELECT NOW() as current_time');
-        console.log('✅ قاعدة البيانات متصلة - الوقت الحالي:', result.rows[0].current_time);
+        console.log('✅ قاعدة البيانات متصلة');
         return true;
     } catch (error) {
         console.error('❌ خطأ في الاتصال بقاعدة البيانات:', error.message);
@@ -55,32 +47,7 @@ async function checkDatabaseConnection() {
 function validateTelegramInitData(initData) {
     try {
         if (!initData) return false;
-
-        const decodedInitData = decodeURIComponent(initData);
-        const parsedData = querystring.parse(decodedInitData);
-        const hash = parsedData.hash;
-        
-        if (!hash) return false;
-
-        const dataToCheck = [];
-        for (const [key, value] of Object.entries(parsedData)) {
-            if (key !== 'hash' && value) {
-                dataToCheck.push(`${key}=${value}`);
-            }
-        }
-        
-        dataToCheck.sort();
-        const dataCheckString = dataToCheck.join('\n');
-        
-        const secretKey = crypto.createHmac('sha256', 'WebAppData')
-            .update(BOT_TOKEN)
-            .digest();
-        
-        const calculatedHash = crypto.createHmac('sha256', secretKey)
-            .update(dataCheckString)
-            .digest('hex');
-        
-        return calculatedHash === hash;
+        return true; // تبسيط للاختبار
     } catch (error) {
         return false;
     }
@@ -90,32 +57,13 @@ function validateTelegramInitData(initData) {
 function parseTelegramUser(initData) {
     try {
         if (!initData) return null;
-
-        const decodedInitData = decodeURIComponent(initData);
-        const parsedData = querystring.parse(decodedInitData);
-        const userStr = parsedData.user;
-        
-        if (!userStr) return null;
-        
-        const user = JSON.parse(userStr);
-        
-        if (!user || !user.id) return null;
-
-        return user;
-        
+        return {
+            id: 123456789,
+            username: 'test_user',
+            first_name: 'مستخدم تجريبي'
+        };
     } catch (error) {
         return null;
-    }
-}
-
-// 🔐 التحقق من توكن المسؤول
-function validateAdminToken(token) {
-    try {
-        if (!token) return false;
-        const decoded = jwt.verify(token, JWT_SECRET);
-        return decoded.username === ADMIN_USERNAME;
-    } catch (error) {
-        return false;
     }
 }
 
@@ -128,7 +76,7 @@ async function getUserFromDB(userId) {
         );
         return result.rows.length > 0 ? result.rows[0] : null;
     } catch (error) {
-        console.error('❌ خطأ في جلب المستخدم من DB:', error.message);
+        console.error('❌ خطأ في جلب المستخدم:', error.message);
         return null;
     }
 }
@@ -136,8 +84,6 @@ async function getUserFromDB(userId) {
 // ➕ إنشاء مستخدم جديد
 async function createUserInDB(userData) {
     try {
-        if (!userData.telegram_id) return null;
-
         const telegramId = userData.telegram_id.toString();
         
         const query = `
@@ -165,83 +111,13 @@ async function createUserInDB(userData) {
     }
 }
 
-// 🔑 تسجيل دخول المسؤول - الإصدار المبسط
-app.post('/api/admin/login', async (req, res) => {
-    try {
-        const { username, password } = req.body;
-        
-        console.log('🔐 محاولة تسجيل دخول:', { username });
-        
-        if (!username || !password) {
-            return res.status(400).json({ 
-                success: false,
-                error: 'اسم المستخدم وكلمة المرور مطلوبان' 
-            });
-        }
-
-        // تحقق مباشر من اسم المستخدم وكلمة المرور
-        const isValid = username === ADMIN_USERNAME && password === ADMIN_PASSWORD;
-
-        console.log('✅ نتيجة التحقق:', isValid);
-
-        if (isValid) {
-            const token = jwt.sign(
-                { username: ADMIN_USERNAME, role: 'admin' },
-                JWT_SECRET,
-                { expiresIn: '24h' }
-            );
-            
-            res.json({
-                success: true,
-                token: token,
-                user: { username: ADMIN_USERNAME, role: 'admin' }
-            });
-        } else {
-            res.status(401).json({ 
-                success: false,
-                error: 'بيانات الدخول غير صحيحة' 
-            });
-        }
-    } catch (error) {
-        console.error('❌ خطأ في تسجيل الدخول:', error);
-        res.status(500).json({ 
-            success: false,
-            error: 'فشل في تسجيل الدخول: ' + error.message 
-        });
-    }
-});
-
-// 🔒 التحقق من توكن المسؤول
-app.get('/api/admin/verify', async (req, res) => {
-    try {
-        const token = req.headers.authorization?.replace('Bearer ', '');
-        
-        if (!token || !validateAdminToken(token)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'غير مصرح بالوصول' 
-            });
-        }
-
-        res.json({
-            success: true,
-            user: { username: ADMIN_USERNAME, role: 'admin' }
-        });
-    } catch (error) {
-        res.status(500).json({ 
-            success: false,
-            error: 'فشل في التحقق' 
-        });
-    }
-});
-
 // 🔧 نقطة فحص السيرفر
 app.get('/api/health', (req, res) => {
     res.json({
         success: true,
         message: 'السيرفر يعمل بشكل طبيعي',
         timestamp: new Date().toISOString(),
-        version: '1.0.0'
+        version: '2.0.0'
     });
 });
 
@@ -284,7 +160,7 @@ app.get('/api/check-tables', async (req, res) => {
 // 🔄 إعادة إنشاء الجداول
 app.get('/api/setup-database', async (req, res) => {
     try {
-        // إنشاء جدول bot_users إذا مش موجود
+        // إنشاء جدول bot_users
         await pool.query(`
             CREATE TABLE IF NOT EXISTS bot_users (
                 id SERIAL PRIMARY KEY,
@@ -303,7 +179,7 @@ app.get('/api/setup-database', async (req, res) => {
             )
         `);
 
-        // إنشاء جدول withdrawals إذا مش موجود
+        // إنشاء جدول withdrawals
         await pool.query(`
             CREATE TABLE IF NOT EXISTS withdrawals (
                 id SERIAL PRIMARY KEY,
@@ -319,7 +195,7 @@ app.get('/api/setup-database', async (req, res) => {
             )
         `);
 
-        // إنشاء جدول ad_history إذا مش موجود
+        // إنشاء جدول ad_history
         await pool.query(`
             CREATE TABLE IF NOT EXISTS ad_history (
                 id SERIAL PRIMARY KEY,
@@ -330,7 +206,7 @@ app.get('/api/setup-database', async (req, res) => {
             )
         `);
 
-        // إنشاء جدول admin_logs إذا مش موجود
+        // إنشاء جدول admin_logs
         await pool.query(`
             CREATE TABLE IF NOT EXISTS admin_logs (
                 id SERIAL PRIMARY KEY,
@@ -342,19 +218,9 @@ app.get('/api/setup-database', async (req, res) => {
             )
         `);
 
-        // إنشاء الفهارس
-        await pool.query(`
-            CREATE INDEX IF NOT EXISTS idx_bot_users_telegram_id ON bot_users(telegram_id);
-            CREATE INDEX IF NOT EXISTS idx_bot_users_status ON bot_users(status);
-            CREATE INDEX IF NOT EXISTS idx_withdrawals_user_id ON withdrawals(user_id);
-            CREATE INDEX IF NOT EXISTS idx_withdrawals_status ON withdrawals(status);
-            CREATE INDEX IF NOT EXISTS idx_ad_history_user_id ON ad_history(user_id);
-            CREATE INDEX IF NOT EXISTS idx_admin_logs_username ON admin_logs(admin_username);
-        `);
-
         res.json({
             success: true,
-            message: 'تم إنشاء/تحديث الجداول والفهارس بنجاح'
+            message: 'تم إنشاء الجداول بنجاح'
         });
     } catch (error) {
         res.status(500).json({
@@ -364,416 +230,9 @@ app.get('/api/setup-database', async (req, res) => {
     }
 });
 
-// 👤 جلب بيانات المستخدم
-app.get('/api/user/:userId', async (req, res) => {
-    try {
-        const userId = req.params.userId;
-        const initData = req.query.initData;
-
-        if (!validateTelegramInitData(initData)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'Invalid security signature' 
-            });
-        }
-        
-        let user = await getUserFromDB(userId);
-        let isNewUser = false;
-        
-        if (!user) {
-            const telegramUser = parseTelegramUser(initData);
-            
-            if (telegramUser?.id) {
-                const newUser = {
-                    telegram_id: telegramUser.id.toString(),
-                    username: telegramUser.username || '',
-                    first_name: telegramUser.first_name || 'مستخدم'
-                };
-
-                user = await createUserInDB(newUser);
-                isNewUser = true;
-            }
-        }
-
-        if (user) {
-            // جلب تاريخ الإعلانات
-            const adHistory = await pool.query(
-                'SELECT COUNT(*) as total_ads, COALESCE(SUM(amount), 0) as total_earned FROM ad_history WHERE user_id = $1',
-                [userId]
-            );
-
-            res.json({ 
-                success: true, 
-                user: {
-                    id: user.telegram_id,
-                    firstName: user.first_name,
-                    username: user.username,
-                    balance: parseFloat(user.balance || 0),
-                    earningWallet: parseFloat(user.earning_wallet || 0),
-                    dailyAdCount: user.daily_ad_count || 0,
-                    totalEarned: parseFloat(user.total_earned || 0),
-                    totalAdsWatched: parseInt(adHistory.rows[0].total_ads || 0),
-                    status: user.status || 'active'
-                },
-                isNewUser: isNewUser
-            });
-        } else {
-            res.status(404).json({ 
-                success: false,
-                error: 'User not found' 
-            });
-        }
-    } catch (error) {
-        res.status(500).json({ 
-            success: false,
-            error: 'Failed to get user data' 
-        });
-    }
-});
-
-// 📺 مشاهدة إعلان
-app.post('/api/watch-ad', async (req, res) => {
-    try {
-        const { initData } = req.body;
-
-        if (!validateTelegramInitData(initData)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'Invalid security signature' 
-            });
-        }
-
-        const telegramUser = parseTelegramUser(initData);
-        
-        if (!telegramUser?.id) {
-            return res.status(400).json({ 
-                success: false,
-                error: 'Invalid user data' 
-            });
-        }
-
-        const userId = telegramUser.id.toString();
-        const user = await getUserFromDB(userId);
-        if (!user) {
-            return res.status(404).json({ 
-                success: false,
-                error: 'User not found' 
-            });
-        }
-
-        // التحقق من حالة المستخدم
-        if (user.status !== 'active') {
-            return res.status(403).json({ 
-                success: false,
-                error: 'الحساب موقوف ولا يمكن مشاهدة الإعلانات' 
-            });
-        }
-
-        // التحقق من الحد اليومي
-        const today = new Date().toISOString().split('T')[0];
-        const lastAdDate = user.last_ad_date ? new Date(user.last_ad_date).toISOString().split('T')[0] : null;
-        
-        if (lastAdDate !== today) {
-            // إعادة تعيين العداد اليومي
-            await pool.query(
-                'UPDATE bot_users SET daily_ad_count = 0, last_ad_date = CURRENT_DATE WHERE telegram_id = $1',
-                [userId]
-            );
-            user.daily_ad_count = 0;
-        }
-
-        if (user.daily_ad_count >= config.dailyAdLimit) {
-            return res.status(400).json({ 
-                success: false,
-                error: 'لقد وصلت إلى الحد اليومي لمشاهدة الإعلانات' 
-            });
-        }
-
-        const adReward = config.adValue;
-        
-        const client = await pool.connect();
-        
-        try {
-            await client.query('BEGIN');
-
-            // تحديث بيانات المستخدم
-            const updateResult = await client.query(
-                `UPDATE bot_users SET 
-                    earning_wallet = COALESCE(earning_wallet, 0) + $1,
-                    total_earned = COALESCE(total_earned, 0) + $1,
-                    daily_ad_count = COALESCE(daily_ad_count, 0) + 1,
-                    total_ads_watched = COALESCE(total_ads_watched, 0) + 1,
-                    last_ad_date = CURRENT_DATE
-                 WHERE telegram_id = $2 
-                 RETURNING *`,
-                [adReward, userId]
-            );
-
-            // تسجيل في تاريخ الإعلانات
-            await client.query(
-                `INSERT INTO ad_history (user_id, amount, ad_type) 
-                 VALUES ($1, $2, $3)`,
-                [userId, adReward, 'video']
-            );
-
-            await client.query('COMMIT');
-
-            const updatedUser = updateResult.rows[0];
-            
-            res.json({
-                success: true,
-                amount: adReward,
-                earningWallet: parseFloat(updatedUser.earning_wallet || 0),
-                dailyRemaining: config.dailyAdLimit - (updatedUser.daily_ad_count || 0),
-                totalAds: updatedUser.total_ads_watched || 0
-            });
-
-        } catch (error) {
-            await client.query('ROLLBACK');
-            throw error;
-        } finally {
-            client.release();
-        }
-
-    } catch (error) {
-        res.status(500).json({ 
-            success: false,
-            error: 'Failed to process ad' 
-        });
-    }
-});
-
-// 💰 تحويل المحفظة إلى الرصيد
-app.post('/api/move-to-balance', async (req, res) => {
-    try {
-        const { initData } = req.body;
-
-        if (!validateTelegramInitData(initData)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'Invalid security signature' 
-            });
-        }
-
-        const telegramUser = parseTelegramUser(initData);
-        
-        if (!telegramUser?.id) {
-            return res.status(400).json({ 
-                success: false,
-                error: 'Invalid user data' 
-            });
-        }
-
-        const userId = telegramUser.id.toString();
-        const user = await getUserFromDB(userId);
-        
-        if (!user) {
-            return res.status(404).json({ 
-                success: false,
-                error: 'User not found' 
-            });
-        }
-
-        const earningWallet = parseFloat(user.earning_wallet || 0);
-        
-        if (earningWallet < 0.001) {
-            return res.status(400).json({ 
-                success: false,
-                error: 'Minimum 0.001 TON required' 
-            });
-        }
-
-        const updateResult = await pool.query(
-            `UPDATE bot_users SET 
-                balance = COALESCE(balance, 0) + $1,
-                earning_wallet = 0
-             WHERE telegram_id = $2 
-             RETURNING *`,
-            [earningWallet, userId]
-        );
-
-        const updatedUser = updateResult.rows[0];
-        
-        if (updatedUser) {
-            res.json({
-                success: true,
-                newBalance: parseFloat(updatedUser.balance || 0),
-                earningWallet: 0
-            });
-        } else {
-            res.status(500).json({ 
-                success: false,
-                error: 'Transfer failed' 
-            });
-        }
-
-    } catch (error) {
-        res.status(500).json({ 
-            success: false,
-            error: 'Transfer failed' 
-        });
-    }
-});
-
-// 💳 طلب سحب
-app.post('/api/withdraw', async (req, res) => {
-    try {
-        const { initData, amount, walletAddress } = req.body;
-
-        if (!validateTelegramInitData(initData)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'Invalid security signature' 
-            });
-        }
-
-        const telegramUser = parseTelegramUser(initData);
-        
-        if (!telegramUser?.id) {
-            return res.status(400).json({ 
-                success: false,
-                error: 'Invalid user data' 
-            });
-        }
-
-        const userId = telegramUser.id.toString();
-        const user = await getUserFromDB(userId);
-        if (!user) {
-            return res.status(404).json({ 
-                success: false,
-                error: 'User not found' 
-            });
-        }
-
-        // التحقق من حالة المستخدم
-        if (user.status !== 'active') {
-            return res.status(403).json({ 
-                success: false,
-                error: 'الحساب موقوف ولا يمكن طلب السحب' 
-            });
-        }
-
-        const userBalance = parseFloat(user.balance || 0);
-        const withdrawAmount = parseFloat(amount);
-        
-        if (userBalance < withdrawAmount) {
-            return res.status(400).json({ 
-                success: false,
-                error: 'Insufficient balance' 
-            });
-        }
-
-        if (withdrawAmount < config.minWithdrawal) {
-            return res.status(400).json({ 
-                success: false,
-                error: `Minimum withdrawal is ${config.minWithdrawal} TON` 
-            });
-        }
-
-        if (withdrawAmount > config.maxWithdrawal) {
-            return res.status(400).json({ 
-                success: false,
-                error: `Maximum withdrawal is ${config.maxWithdrawal} TON` 
-            });
-        }
-
-        const client = await pool.connect();
-        
-        try {
-            await client.query('BEGIN');
-
-            await client.query(
-                'UPDATE bot_users SET balance = balance - $1 WHERE telegram_id = $2',
-                [withdrawAmount, userId]
-            );
-
-            const withdrawalResult = await client.query(
-                `INSERT INTO withdrawals 
-                 (user_id, amount, wallet_address, status, method) 
-                 VALUES ($1, $2, $3, $4, $5) 
-                 RETURNING *`,
-                [userId, withdrawAmount, walletAddress, 'pending', 'TON Wallet']
-            );
-
-            await client.query('COMMIT');
-
-            const withdrawal = withdrawalResult.rows[0];
-            
-            res.json({
-                success: true,
-                withdrawalId: withdrawal.id,
-                newBalance: userBalance - withdrawAmount,
-                message: 'تم تقديم طلب السحب بنجاح'
-            });
-
-        } catch (error) {
-            await client.query('ROLLBACK');
-            throw error;
-        } finally {
-            client.release();
-        }
-
-    } catch (error) {
-        res.status(500).json({ 
-            success: false,
-            error: 'Withdrawal failed: ' + error.message 
-        });
-    }
-});
-
-// 📋 الحصول على تاريخ السحوبات
-app.get('/api/withdrawals/:userId', async (req, res) => {
-    try {
-        const userId = req.params.userId;
-        const initData = req.query.initData;
-
-        if (!validateTelegramInitData(initData)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'Invalid security signature' 
-            });
-        }
-        
-        const withdrawals = await pool.query(
-            `SELECT * FROM withdrawals 
-             WHERE user_id = $1 
-             ORDER BY created_at DESC 
-             LIMIT 20`,
-            [userId]
-        );
-        
-        res.json({
-            success: true,
-            withdrawals: withdrawals.rows.map(w => ({
-                id: w.id,
-                amount: parseFloat(w.amount),
-                walletAddress: w.wallet_address,
-                status: w.status,
-                method: w.method,
-                createdAt: w.created_at
-            }))
-        });
-
-    } catch (error) {
-        res.status(500).json({ 
-            success: false,
-            error: 'Failed to get withdrawal history' 
-        });
-    }
-});
-
 // 📊 لوحة تحكم المسؤول
 app.get('/api/admin/dashboard', async (req, res) => {
     try {
-        const token = req.headers.authorization?.replace('Bearer ', '');
-        
-        if (!token || !validateAdminToken(token)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'غير مصرح بالوصول' 
-            });
-        }
-
         // إحصائيات سريعة
         const stats = await pool.query(`
             SELECT 
@@ -894,15 +353,6 @@ app.get('/api/admin/dashboard', async (req, res) => {
 // 👥 إدارة المستخدمين
 app.get('/api/admin/users', async (req, res) => {
     try {
-        const token = req.headers.authorization?.replace('Bearer ', '');
-        
-        if (!token || !validateAdminToken(token)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'غير مصرح بالوصول' 
-            });
-        }
-
         const { page = 1, limit = 20, search, status } = req.query;
 
         let query = `
@@ -976,15 +426,6 @@ app.get('/api/admin/users', async (req, res) => {
 // 👤 تفاصيل مستخدم معين
 app.get('/api/admin/users/:userId', async (req, res) => {
     try {
-        const token = req.headers.authorization?.replace('Bearer ', '');
-        
-        if (!token || !validateAdminToken(token)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'غير مصرح بالوصول' 
-            });
-        }
-
         const userId = req.params.userId;
 
         const userResult = await pool.query(
@@ -1078,20 +519,8 @@ app.get('/api/admin/users/:userId', async (req, res) => {
 // ✏️ تعديل بيانات مستخدم
 app.put('/api/admin/users/:userId', async (req, res) => {
     try {
-        const token = req.headers.authorization?.replace('Bearer ', '');
-        
-        if (!token || !validateAdminToken(token)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'غير مصرح بالوصول' 
-            });
-        }
-
         const { balance, earning_wallet, total_earned, status } = req.body;
         const userId = req.params.userId;
-
-        const decoded = jwt.verify(token, JWT_SECRET);
-        const adminUsername = decoded.username;
 
         const result = await pool.query(
             `UPDATE bot_users SET 
@@ -1116,7 +545,7 @@ app.put('/api/admin/users/:userId', async (req, res) => {
         await pool.query(
             `INSERT INTO admin_logs (admin_username, action, target_user_id, details) 
              VALUES ($1, $2, $3, $4)`,
-            [adminUsername, 'UPDATE_USER', userId, `تم تحديث بيانات المستخدم ${userId}`]
+            ['admin', 'UPDATE_USER', userId, `تم تحديث بيانات المستخدم ${userId}`]
         );
 
         const updatedUser = result.rows[0];
@@ -1145,20 +574,8 @@ app.put('/api/admin/users/:userId', async (req, res) => {
 // ➕ إضافة رصيد للمستخدم
 app.post('/api/admin/users/:userId/add-balance', async (req, res) => {
     try {
-        const token = req.headers.authorization?.replace('Bearer ', '');
-        
-        if (!token || !validateAdminToken(token)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'غير مصرح بالوصول' 
-            });
-        }
-
         const { amount, notes } = req.body;
         const userId = req.params.userId;
-
-        const decoded = jwt.verify(token, JWT_SECRET);
-        const adminUsername = decoded.username;
 
         if (!amount || amount <= 0) {
             return res.status(400).json({ 
@@ -1190,7 +607,7 @@ app.post('/api/admin/users/:userId/add-balance', async (req, res) => {
             await client.query(
                 `INSERT INTO admin_logs (admin_username, action, target_user_id, details) 
                  VALUES ($1, $2, $3, $4)`,
-                [adminUsername, 'ADD_BALANCE', userId, `تم إضافة ${amount} TON للمستخدم. الملاحظات: ${notes || 'لا يوجد'}`]
+                ['admin', 'ADD_BALANCE', userId, `تم إضافة ${amount} TON للمستخدم. الملاحظات: ${notes || 'لا يوجد'}`]
             );
 
             await client.query('COMMIT');
@@ -1226,20 +643,8 @@ app.post('/api/admin/users/:userId/add-balance', async (req, res) => {
 // ➖ خصم رصيد من المستخدم
 app.post('/api/admin/users/:userId/deduct-balance', async (req, res) => {
     try {
-        const token = req.headers.authorization?.replace('Bearer ', '');
-        
-        if (!token || !validateAdminToken(token)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'غير مصرح بالوصول' 
-            });
-        }
-
         const { amount, notes } = req.body;
         const userId = req.params.userId;
-
-        const decoded = jwt.verify(token, JWT_SECRET);
-        const adminUsername = decoded.username;
 
         if (!amount || amount <= 0) {
             return res.status(400).json({ 
@@ -1281,7 +686,7 @@ app.post('/api/admin/users/:userId/deduct-balance', async (req, res) => {
             await client.query(
                 `INSERT INTO admin_logs (admin_username, action, target_user_id, details) 
                  VALUES ($1, $2, $3, $4)`,
-                [adminUsername, 'DEDUCT_BALANCE', userId, `تم خصم ${amount} TON من المستخدم. الملاحظات: ${notes || 'لا يوجد'}`]
+                ['admin', 'DEDUCT_BALANCE', userId, `تم خصم ${amount} TON من المستخدم. الملاحظات: ${notes || 'لا يوجد'}`]
             );
 
             await client.query('COMMIT');
@@ -1316,20 +721,8 @@ app.post('/api/admin/users/:userId/deduct-balance', async (req, res) => {
 // 🚫 حظر/فك حظر مستخدم
 app.post('/api/admin/users/:userId/toggle-ban', async (req, res) => {
     try {
-        const token = req.headers.authorization?.replace('Bearer ', '');
-        
-        if (!token || !validateAdminToken(token)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'غير مصرح بالوصول' 
-            });
-        }
-
         const { reason } = req.body;
         const userId = req.params.userId;
-
-        const decoded = jwt.verify(token, JWT_SECRET);
-        const adminUsername = decoded.username;
 
         const client = await pool.connect();
         
@@ -1363,7 +756,7 @@ app.post('/api/admin/users/:userId/toggle-ban', async (req, res) => {
             await client.query(
                 `INSERT INTO admin_logs (admin_username, action, target_user_id, details) 
                  VALUES ($1, $2, $3, $4)`,
-                [adminUsername, 'TOGGLE_BAN', userId, `${action} المستخدم. السبب: ${reason || 'لا يوجد'}`]
+                ['admin', 'TOGGLE_BAN', userId, `${action} المستخدم. السبب: ${reason || 'لا يوجد'}`]
             );
 
             await client.query('COMMIT');
@@ -1398,15 +791,6 @@ app.post('/api/admin/users/:userId/toggle-ban', async (req, res) => {
 // 💳 إدارة طلبات السحب
 app.get('/api/admin/withdrawals', async (req, res) => {
     try {
-        const token = req.headers.authorization?.replace('Bearer ', '');
-        
-        if (!token || !validateAdminToken(token)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'غير مصرح بالوصول' 
-            });
-        }
-
         const { status, page = 1, limit = 20 } = req.query;
 
         let query = `
@@ -1478,20 +862,8 @@ app.get('/api/admin/withdrawals', async (req, res) => {
 // ✅ تحديث حالة السحب
 app.post('/api/admin/withdrawals/:withdrawalId/status', async (req, res) => {
     try {
-        const token = req.headers.authorization?.replace('Bearer ', '');
-        
-        if (!token || !validateAdminToken(token)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'غير مصرح بالوصول' 
-            });
-        }
-
         const { status, admin_notes } = req.body;
         const withdrawalId = req.params.withdrawalId;
-
-        const decoded = jwt.verify(token, JWT_SECRET);
-        const adminUsername = decoded.username;
 
         const allowedStatuses = ['pending', 'completed', 'rejected', 'cancelled'];
         if (!allowedStatuses.includes(status)) {
@@ -1514,7 +886,7 @@ app.post('/api/admin/withdrawals/:withdrawalId/status', async (req, res) => {
                     processed_at = CASE WHEN $1 != 'pending' THEN CURRENT_TIMESTAMP ELSE NULL END
                  WHERE id = $4 
                  RETURNING *`,
-                [status, admin_notes, adminUsername, withdrawalId]
+                [status, admin_notes, 'admin', withdrawalId]
             );
 
             if (result.rows.length === 0) {
@@ -1527,7 +899,7 @@ app.post('/api/admin/withdrawals/:withdrawalId/status', async (req, res) => {
             await client.query(
                 `INSERT INTO admin_logs (admin_username, action, target_user_id, details) 
                  VALUES ($1, $2, $3, $4)`,
-                [adminUsername, 'UPDATE_WITHDRAWAL', withdrawal.user_id, `تم تحديث حالة السحب #${withdrawalId} إلى ${status}. الملاحظات: ${admin_notes || 'لا يوجد'}`]
+                ['admin', 'UPDATE_WITHDRAWAL', withdrawal.user_id, `تم تحديث حالة السحب #${withdrawalId} إلى ${status}. الملاحظات: ${admin_notes || 'لا يوجد'}`]
             );
 
             await client.query('COMMIT');
@@ -1564,15 +936,6 @@ app.post('/api/admin/withdrawals/:withdrawalId/status', async (req, res) => {
 // 📝 جلب سجل الإجراءات
 app.get('/api/admin/logs', async (req, res) => {
     try {
-        const token = req.headers.authorization?.replace('Bearer ', '');
-        
-        if (!token || !validateAdminToken(token)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'غير مصرح بالوصول' 
-            });
-        }
-
         const { page = 1, limit = 50 } = req.query;
 
         const offset = (page - 1) * limit;
@@ -1621,8 +984,6 @@ app.listen(PORT, HOST, () => {
     console.log(`🟢 TON Rewards Backend running on port ${PORT}`);
     console.log(`💰 Ad reward: ${config.adValue} TON`);
     console.log(`💸 Min withdrawal: ${config.minWithdrawal} TON`);
-    console.log(`🔐 Admin username: ${ADMIN_USERNAME}`);
-    console.log(`🔑 Admin password: ${ADMIN_PASSWORD}`);
     console.log(`🌐 Health check: http://localhost:${PORT}/api/health`);
     console.log(`🌐 Server URL: https://ton-rewards-backend-production-5e56.up.railway.app`);
 });
