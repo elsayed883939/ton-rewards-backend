@@ -19,7 +19,8 @@ const pool = new Pool({
 
 const config = {
     adValue: 0.0005,
-    dailyAdLimit: 10
+    dailyAdLimit: 10,
+    minWithdrawal: 0.01
 };
 
 // 🔧 دالة للتحقق من اتصال قاعدة البيانات
@@ -237,186 +238,6 @@ async function fixMissingColumns() {
     }
 }
 
-// 💸 endpoint للسحب
-app.post('/api/withdraw', async (req, res) => {
-    try {
-        const { initData, amount, walletAddress, method } = req.body;
-
-        console.log('📥 طلب سحب رصيد:', { amount, walletAddress, method });
-
-        if (!validateTelegramInitData(initData)) {
-            console.log('❌ فشل التحقق - رفض السحب');
-            return res.status(401).json({ 
-                success: false,
-                error: 'Invalid security signature' 
-            });
-        }
-
-        console.log('✅ تم التحقق بنجاح - متابعة السحب');
-        const telegramUser = parseTelegramUser(initData);
-        
-        if (!telegramUser?.id) {
-            console.log('❌ بيانات المستخدم غير صالحة');
-            return res.status(400).json({ 
-                success: false,
-                error: 'Invalid user data' 
-            });
-        }
-
-        const userId = telegramUser.id.toString();
-        console.log(`👤 معالجة سحب للمستخدم: ${userId}`);
-        
-        // جلب المستخدم من قاعدة البيانات
-        const user = await getUserFromDB(userId);
-        
-        if (!user) {
-            console.log('❌ المستخدم غير موجود');
-            return res.status(404).json({ 
-                success: false,
-                error: 'User not found' 
-            });
-        }
-
-        const userBalance = parseFloat(user.balance || 0);
-        const withdrawAmount = parseFloat(amount);
-        
-        console.log(`💰 رصيد المستخدم: ${userBalance} TON`);
-        console.log(`💸 مبلغ السحب: ${withdrawAmount} TON`);
-
-        // التحقق من الحد الأدنى للسحب
-        if (withdrawAmount < 0.01) {
-            console.log('❌ المبلغ أقل من الحد الأدنى');
-            return res.status(400).json({ 
-                success: false,
-                error: 'Minimum withdrawal amount is 0.01 TON' 
-            });
-        }
-
-        // التحقق من وجود رصيد كافي
-        if (userBalance < withdrawAmount) {
-            console.log('❌ الرصيد غير كافي');
-            return res.status(400).json({ 
-                success: false,
-                error: 'Insufficient balance' 
-            });
-        }
-
-        // التحقق من عنوان المحفظة
-        if (!walletAddress || walletAddress.trim().length < 10) {
-            console.log('❌ عنوان المحفظة غير صالح');
-            return res.status(400).json({ 
-                success: false,
-                error: 'Invalid wallet address' 
-            });
-        }
-
-        // بدء معاملة السحب
-        const client = await pool.connect();
-        
-        try {
-            await client.query('BEGIN');
-
-            // 1. خصم المبلغ من رصيد المستخدم
-            const updateResult = await client.query(
-                `UPDATE bot_users 
-                 SET balance = COALESCE(balance, 0) - $1 
-                 WHERE telegram_id = $2 AND COALESCE(balance, 0) >= $1
-                 RETURNING *`,
-                [withdrawAmount, userId]
-            );
-
-            if (updateResult.rows.length === 0) {
-                throw new Error('فشل في خصم الرصيد - قد يكون الرصيد غير كافي');
-            }
-
-            // 2. تسجيل طلب السحب
-            const withdrawResult = await client.query(
-                `INSERT INTO withdrawals 
-                 (user_id, amount, wallet_address, status, method) 
-                 VALUES ($1, $2, $3, $4, $5) 
-                 RETURNING *`,
-                [userId, withdrawAmount, walletAddress.trim(), 'pending', method || 'TON Wallet']
-            );
-
-            await client.query('COMMIT');
-
-            const updatedUser = updateResult.rows[0];
-            const withdrawal = withdrawResult.rows[0];
-
-            console.log('✅ تمت عملية السحب بنجاح:', {
-                withdrawalId: withdrawal.id,
-                newBalance: updatedUser.balance
-            });
-
-            res.json({
-                success: true,
-                newBalance: parseFloat(updatedUser.balance || 0),
-                withdrawalId: withdrawal.id,
-                message: 'تم تقديم طلب السحب بنجاح'
-            });
-
-        } catch (error) {
-            await client.query('ROLLBACK');
-            console.error('❌ خطأ في معاملة السحب:', error.message);
-            throw error;
-        } finally {
-            client.release();
-        }
-
-    } catch (error) {
-        console.error('❌ خطأ في السحب:', error.message);
-        res.status(500).json({ 
-            success: false,
-            error: 'Withdrawal failed: ' + error.message 
-        });
-    }
-});
-
-// 📋 جلب طلبات السحب للمستخدم
-app.get('/api/withdrawals/:userId', async (req, res) => {
-    try {
-        const userId = req.params.userId;
-        const initData = req.query.initData;
-
-        console.log(`📥 طلب جلب طلبات السحب للمستخدم: ${userId}`);
-
-        if (!validateTelegramInitData(initData)) {
-            console.log('❌ فشل التحقق - رفض الطلب');
-            return res.status(401).json({ 
-                success: false,
-                error: 'Invalid security signature' 
-            });
-        }
-
-        const result = await pool.query(
-            `SELECT * FROM withdrawals 
-             WHERE user_id = $1 
-             ORDER BY created_at DESC 
-             LIMIT 10`,
-            [userId]
-        );
-
-        res.json({
-            success: true,
-            withdrawals: result.rows.map(row => ({
-                id: row.id,
-                amount: parseFloat(row.amount),
-                walletAddress: row.wallet_address,
-                status: row.status,
-                method: row.method,
-                createdAt: row.created_at
-            }))
-        });
-
-    } catch (error) {
-        console.error('❌ خطأ في جلب طلبات السحب:', error.message);
-        res.status(500).json({ 
-            success: false,
-            error: 'Failed to get withdrawals' 
-        });
-    }
-});
-
 // 🏠 الصفحة الرئيسية
 app.get('/', async (req, res) => {
     const dbConnected = await checkDatabaseConnection();
@@ -426,6 +247,62 @@ app.get('/', async (req, res) => {
         status: dbConnected ? '✅ متصل بقاعدة البيانات' : '❌ خطأ في قاعدة البيانات',
         timestamp: new Date().toISOString()
     });
+});
+
+// 🔍 فحص الجداول
+app.get('/api/check-tables', async (req, res) => {
+    try {
+        const tables = await pool.query(`
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_schema = 'public'
+        `);
+        
+        const tableNames = tables.rows.map(row => row.table_name);
+        console.log('📊 الجداول الموجودة:', tableNames);
+        
+        res.json({
+            success: true,
+            tables: tableNames,
+            hasBotUsers: tableNames.includes('bot_users'),
+            hasWithdrawals: tableNames.includes('withdrawals')
+        });
+    } catch (error) {
+        console.error('❌ خطأ في فحص الجداول:', error);
+        res.status(500).json({ 
+            success: false,
+            error: error.message 
+        });
+    }
+});
+
+// 🧪 اختبار السحب
+app.get('/api/test-withdrawal', async (req, res) => {
+    try {
+        // تحقق من وجود جدول السحوبات
+        const tableCheck = await pool.query(`
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'withdrawals'
+            )
+        `);
+        
+        const withdrawalsTableExists = tableCheck.rows[0].exists;
+        
+        res.json({
+            success: true,
+            withdrawalsTableExists: withdrawalsTableExists,
+            message: withdrawalsTableExists 
+                ? '✅ جدول السحوبات موجود وجاهز' 
+                : '❌ جدول السحوبات غير موجود - استخدم /api/setup-database'
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
 });
 
 // 🔧 endpoint لإصلاح الأعمدة الناقصة
@@ -473,8 +350,7 @@ app.get('/api/setup-database', async (req, res) => {
                 wallet_address TEXT NOT NULL,
                 status VARCHAR(50) DEFAULT 'pending',
                 method VARCHAR(100) DEFAULT 'TON Wallet',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
 
@@ -831,11 +707,178 @@ app.post('/api/move-to-balance', async (req, res) => {
     }
 });
 
+// 💳 طلب سحب
+app.post('/api/withdraw', async (req, res) => {
+    try {
+        const { initData, amount, walletAddress } = req.body;
+
+        console.log('📥 طلب سحب:', { amount, walletAddress });
+
+        if (!validateTelegramInitData(initData)) {
+            console.log('❌ فشل التحقق - رفض السحب');
+            return res.status(401).json({ 
+                success: false,
+                error: 'Invalid security signature' 
+            });
+        }
+
+        console.log('✅ تم التحقق بنجاح - متابعة السحب');
+        const telegramUser = parseTelegramUser(initData);
+        
+        if (!telegramUser?.id) {
+            console.log('❌ بيانات المستخدم غير صالحة');
+            return res.status(400).json({ 
+                success: false,
+                error: 'Invalid user data' 
+            });
+        }
+
+        const userId = telegramUser.id.toString();
+        console.log(`👤 معالجة سحب للمستخدم: ${userId}`);
+        
+        // جلب المستخدم من قاعدة البيانات
+        const user = await getUserFromDB(userId);
+        if (!user) {
+            console.log('❌ المستخدم غير موجود');
+            return res.status(404).json({ 
+                success: false,
+                error: 'User not found' 
+            });
+        }
+
+        const userBalance = parseFloat(user.balance || 0);
+        const withdrawAmount = parseFloat(amount);
+        
+        console.log(`💰 رصيد المستخدم: ${userBalance} TON`);
+        console.log(`💸 مبلغ السحب: ${withdrawAmount} TON`);
+
+        // التحقق من الرصيد
+        if (userBalance < withdrawAmount) {
+            console.log('❌ رصيد غير كافي');
+            return res.status(400).json({ 
+                success: false,
+                error: 'Insufficient balance' 
+            });
+        }
+
+        // التحقق من الحد الأدنى للسحب
+        if (withdrawAmount < config.minWithdrawal) {
+            console.log(`❌ الحد الأدنى للسحب ${config.minWithdrawal} TON`);
+            return res.status(400).json({ 
+                success: false,
+                error: `Minimum withdrawal is ${config.minWithdrawal} TON` 
+            });
+        }
+
+        // بدء معاملة السحب
+        const client = await pool.connect();
+        
+        try {
+            await client.query('BEGIN');
+
+            // خصم المبلغ من رصيد المستخدم
+            await client.query(
+                'UPDATE bot_users SET balance = balance - $1 WHERE telegram_id = $2',
+                [withdrawAmount, userId]
+            );
+
+            // تسجيل طلب السحب
+            const withdrawalResult = await client.query(
+                `INSERT INTO withdrawals 
+                 (user_id, amount, wallet_address, status, method) 
+                 VALUES ($1, $2, $3, $4, $5) 
+                 RETURNING *`,
+                [userId, withdrawAmount, walletAddress, 'pending', 'TON Wallet']
+            );
+
+            await client.query('COMMIT');
+
+            const withdrawal = withdrawalResult.rows[0];
+            
+            console.log('✅ تم إنشاء طلب السحب بنجاح:', withdrawal.id);
+            
+            res.json({
+                success: true,
+                withdrawalId: withdrawal.id,
+                newBalance: userBalance - withdrawAmount,
+                message: 'تم تقديم طلب السحب بنجاح وسيتم معالجته خلال 24 ساعة'
+            });
+
+        } catch (error) {
+            await client.query('ROLLBACK');
+            throw error;
+        } finally {
+            client.release();
+        }
+
+    } catch (error) {
+        console.error('❌ خطأ في السحب:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: 'Withdrawal failed: ' + error.message 
+        });
+    }
+});
+
+// 📋 الحصول على تاريخ السحوبات
+app.get('/api/withdrawals/:userId', async (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const initData = req.query.initData;
+
+        console.log(`📥 طلب تاريخ السحوبات للمستخدم: ${userId}`);
+
+        if (!validateTelegramInitData(initData)) {
+            console.log('❌ فشل التحقق - رفض الطلب');
+            return res.status(401).json({ 
+                success: false,
+                error: 'Invalid security signature' 
+            });
+        }
+
+        console.log('✅ تم التحقق بنجاح - متابعة الطلب');
+        
+        // جلب تاريخ السحوبات
+        const withdrawals = await pool.query(
+            `SELECT * FROM withdrawals 
+             WHERE user_id = $1 
+             ORDER BY created_at DESC 
+             LIMIT 20`,
+            [userId]
+        );
+
+        console.log(`📊 عدد السحوبات: ${withdrawals.rows.length}`);
+        
+        res.json({
+            success: true,
+            withdrawals: withdrawals.rows.map(w => ({
+                id: w.id,
+                amount: parseFloat(w.amount),
+                walletAddress: w.wallet_address,
+                status: w.status,
+                method: w.method,
+                createdAt: w.created_at
+            }))
+        });
+
+    } catch (error) {
+        console.error('❌ خطأ في جلب تاريخ السحوبات:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: 'Failed to get withdrawal history' 
+        });
+    }
+});
+
 // 🚀 تشغيل السيرفر
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 app.listen(PORT, HOST, () => {
     console.log(`🟢 TON Rewards Backend running on port ${PORT}`);
     console.log(`💰 Ad reward: ${config.adValue} TON`);
+    console.log(`💸 Min withdrawal: ${config.minWithdrawal} TON`);
     console.log(`🔐 Telegram verification: ENABLED`);
-});
+    
+    // فحص الاتصال بقاعدة البيانات عند البدء
+    checkDatabaseConnection();
+}); 
