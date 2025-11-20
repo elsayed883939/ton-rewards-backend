@@ -23,6 +23,9 @@ const config = {
     minWithdrawal: 0.01
 };
 
+// 🔐 كلمة سر المسؤول
+const ADMIN_KEY = "ywufbpntu";
+
 // 🔧 دالة للتحقق من اتصال قاعدة البيانات
 async function checkDatabaseConnection() {
     try {
@@ -35,30 +38,22 @@ async function checkDatabaseConnection() {
     }
 }
 
-// 🔐 التحقق من توقيع تليجرام - الإصدار المصحح
+// 🔐 التحقق من المسؤول
+function validateAdmin(admin_key) {
+    return admin_key === ADMIN_KEY;
+}
+
+// 🔐 التحقق من توقيع تليجرام
 function validateTelegramInitData(initData) {
     try {
-        console.log('=== بدء التحقق من التوقيع ===');
-        
-        if (!initData) {
-            console.log('❌ initData غير موجود');
-            return false;
-        }
+        if (!initData) return false;
 
         const decodedInitData = decodeURIComponent(initData);
         const parsedData = querystring.parse(decodedInitData);
-        
-        // 🔥 استخدم hash بدل signature
         const hash = parsedData.hash;
         
-        console.log('🔑 الهاش المستلم:', hash);
+        if (!hash) return false;
 
-        if (!hash) {
-            console.log('❌ لا يوجد هاش في initData');
-            return false;
-        }
-
-        // بناء البيانات للتحقق
         const dataToCheck = [];
         for (const [key, value] of Object.entries(parsedData)) {
             if (key !== 'hash' && value) {
@@ -69,23 +64,16 @@ function validateTelegramInitData(initData) {
         dataToCheck.sort();
         const dataCheckString = dataToCheck.join('\n');
         
-        // إنشاء المفتاح السري
         const secretKey = crypto.createHmac('sha256', 'WebAppData')
             .update(BOT_TOKEN)
             .digest();
         
-        // حساب الهاش
         const calculatedHash = crypto.createHmac('sha256', secretKey)
             .update(dataCheckString)
             .digest('hex');
-
-        console.log('🔢 الهاش المحسوب:', calculatedHash);
-        console.log('🔢 الهاش المستلم:', hash);
-        console.log('✅ التطابق:', calculatedHash === hash ? 'ناجح' : 'فاشل');
         
         return calculatedHash === hash;
     } catch (error) {
-        console.error('❌ خطأ في التحقق:', error);
         return false;
     }
 }
@@ -93,39 +81,21 @@ function validateTelegramInitData(initData) {
 // 👤 استخراج بيانات المستخدم
 function parseTelegramUser(initData) {
     try {
-        if (!initData) {
-            console.log('❌ initData غير موجود');
-            return null;
-        }
+        if (!initData) return null;
 
         const decodedInitData = decodeURIComponent(initData);
         const parsedData = querystring.parse(decodedInitData);
         const userStr = parsedData.user;
         
-        if (!userStr) {
-            console.log('❌ لا توجد بيانات مستخدم في initData');
-            return null;
-        }
+        if (!userStr) return null;
         
-        // فك تشفير JSON
         const user = JSON.parse(userStr);
         
-        // 🔥 تحقق شامل من البيانات
-        if (!user || !user.id) {
-            console.log('❌ بيانات المستخدم غير صالحة - id مفقود');
-            return null;
-        }
+        if (!user || !user.id) return null;
 
-        console.log('✅ بيانات المستخدم صالحة:', {
-            id: user.id,
-            username: user.username,
-            first_name: user.first_name
-        });
-        
         return user;
         
     } catch (error) {
-        console.error('❌ خطأ في تحليل بيانات المستخدم:', error);
         return null;
     }
 }
@@ -133,37 +103,24 @@ function parseTelegramUser(initData) {
 // 📊 جلب المستخدم من قاعدة البيانات
 async function getUserFromDB(userId) {
     try {
-        console.log('🗄️ جلب المستخدم من DB:', userId);
         const result = await pool.query(
             'SELECT * FROM bot_users WHERE telegram_id = $1',
             [userId]
         );
-        
-        const userExists = result.rows.length > 0;
-        console.log('✅ المستخدم موجود في DB:', userExists);
-        
-        return userExists ? result.rows[0] : null;
+        return result.rows.length > 0 ? result.rows[0] : null;
     } catch (error) {
         console.error('❌ خطأ في جلب المستخدم من DB:', error.message);
         return null;
     }
 }
 
-// ➕ إنشاء مستخدم جديد في قاعدة البيانات - الإصدار المحمي
+// ➕ إنشاء مستخدم جديد
 async function createUserInDB(userData) {
     try {
-        console.log('🆕 إنشاء مستخدم جديد - البيانات المستلمة:', userData);
-        
-        // 🔥 تحقق شامل من البيانات
-        if (!userData.telegram_id) {
-            console.log('❌ خطأ: telegram_id مفقود أو undefined');
-            return null;
-        }
+        if (!userData.telegram_id) return null;
 
-        // تحويل telegram_id لـ string علشان نتأكد
         const telegramId = userData.telegram_id.toString();
         
-        // 🔥 استخدم query آمن
         const query = `
             INSERT INTO bot_users 
             (telegram_id, username, first_name, balance, earning_wallet) 
@@ -180,68 +137,17 @@ async function createUserInDB(userData) {
         ];
 
         const result = await pool.query(query, values);
-        
-        console.log('✅ تم إنشاء المستخدم بنجاح');
         return result.rows[0];
         
     } catch (error) {
         console.error('❌ خطأ في إنشاء المستخدم:', error.message);
-        
-        // 🔥 إذا المستخدم موجود بالفعل، جيب بياناته
-        if (error.code === '23505') {
-            console.log('⚠️  المستخدم موجود بالفعل، جاري جلب البيانات...');
-            return await getUserFromDB(userData.telegram_id);
-        }
-        
-        // 🔥 إذا العمود مش موجود، عدل الجدول أولاً
-        if (error.code === '42703') {
-            console.log('⚠️  أعمدة ناقصة، جاري إصلاح الجداول...');
-            await fixMissingColumns();
-            // حاول تاني بعد الإصلاح
-            return await createUserInDB(userData);
-        }
-        
         return null;
-    }
-}
-
-// 🔧 دالة لإصلاح الأعمدة الناقصة
-async function fixMissingColumns() {
-    try {
-        console.log('🔧 بدء إصلاح الأعمدة الناقصة...');
-        
-        const columnsToAdd = [
-            { name: 'username', sql: 'ADD COLUMN IF NOT EXISTS username VARCHAR(255)' },
-            { name: 'first_name', sql: 'ADD COLUMN IF NOT EXISTS first_name VARCHAR(255) NOT NULL DEFAULT \'مستخدم\'' },
-            { name: 'balance', sql: 'ADD COLUMN IF NOT EXISTS balance DECIMAL(15, 8) DEFAULT 0.00000000' },
-            { name: 'earning_wallet', sql: 'ADD COLUMN IF NOT EXISTS earning_wallet DECIMAL(15, 8) DEFAULT 0.00000000' },
-            { name: 'total_earned', sql: 'ADD COLUMN IF NOT EXISTS total_earned DECIMAL(15, 8) DEFAULT 0.00000000' },
-            { name: 'daily_ad_count', sql: 'ADD COLUMN IF NOT EXISTS daily_ad_count INTEGER DEFAULT 0' },
-            { name: 'last_ad_date', sql: 'ADD COLUMN IF NOT EXISTS last_ad_date DATE DEFAULT CURRENT_DATE' },
-            { name: 'created_at', sql: 'ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP' }
-        ];
-
-        for (const column of columnsToAdd) {
-            try {
-                await pool.query(`ALTER TABLE bot_users ${column.sql}`);
-                console.log(`✅ تم إضافة/التحقق من العمود: ${column.name}`);
-            } catch (error) {
-                console.log(`⚠️  تجاهل الخطأ في العمود ${column.name}:`, error.message);
-            }
-        }
-        
-        console.log('✅ تم الانتهاء من إصلاح الأعمدة');
-        return true;
-    } catch (error) {
-        console.error('❌ خطأ في إصلاح الأعمدة:', error);
-        return false;
     }
 }
 
 // 🏠 الصفحة الرئيسية
 app.get('/', async (req, res) => {
     const dbConnected = await checkDatabaseConnection();
-    
     res.json({ 
         message: 'TON Rewards Backend - جاري التشغيل',
         status: dbConnected ? '✅ متصل بقاعدة البيانات' : '❌ خطأ في قاعدة البيانات',
@@ -259,7 +165,6 @@ app.get('/api/check-tables', async (req, res) => {
         `);
         
         const tableNames = tables.rows.map(row => row.table_name);
-        console.log('📊 الجداول الموجودة:', tableNames);
         
         res.json({
             success: true,
@@ -268,7 +173,6 @@ app.get('/api/check-tables', async (req, res) => {
             hasWithdrawals: tableNames.includes('withdrawals')
         });
     } catch (error) {
-        console.error('❌ خطأ في فحص الجداول:', error);
         res.status(500).json({ 
             success: false,
             error: error.message 
@@ -276,53 +180,7 @@ app.get('/api/check-tables', async (req, res) => {
     }
 });
 
-// 🧪 اختبار السحب
-app.get('/api/test-withdrawal', async (req, res) => {
-    try {
-        // تحقق من وجود جدول السحوبات
-        const tableCheck = await pool.query(`
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name = 'withdrawals'
-            )
-        `);
-        
-        const withdrawalsTableExists = tableCheck.rows[0].exists;
-        
-        res.json({
-            success: true,
-            withdrawalsTableExists: withdrawalsTableExists,
-            message: withdrawalsTableExists 
-                ? '✅ جدول السحوبات موجود وجاهز' 
-                : '❌ جدول السحوبات غير موجود - استخدم /api/setup-database'
-        });
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// 🔧 endpoint لإصلاح الأعمدة الناقصة
-app.get('/api/fix-database', async (req, res) => {
-    try {
-        await fixMissingColumns();
-        
-        res.json({
-            success: true,
-            message: 'تم إصلاح الجداول بنجاح'
-        });
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// 🔄 إعادة إنشاء الجداول إذا محتاج
+// 🔄 إعادة إنشاء الجداول
 app.get('/api/setup-database', async (req, res) => {
     try {
         // إنشاء جدول bot_users إذا مش موجود
@@ -354,9 +212,6 @@ app.get('/api/setup-database', async (req, res) => {
             )
         `);
 
-        // 🔥 تأكد من وجود جميع الأعمدة
-        await fixMissingColumns();
-
         res.json({
             success: true,
             message: 'تم إنشاء/تحديث الجداول بنجاح'
@@ -369,32 +224,23 @@ app.get('/api/setup-database', async (req, res) => {
     }
 });
 
-// 👤 جلب بيانات المستخدم من قاعدة البيانات + تسجيل تلقائي
+// 👤 جلب بيانات المستخدم
 app.get('/api/user/:userId', async (req, res) => {
     try {
         const userId = req.params.userId;
         const initData = req.query.initData;
 
-        console.log(`📥 طلب جلب بيانات المستخدم: ${userId}`);
-
         if (!validateTelegramInitData(initData)) {
-            console.log('❌ فشل التحقق - رفض الطلب');
             return res.status(401).json({ 
                 success: false,
                 error: 'Invalid security signature' 
             });
         }
-
-        console.log('✅ تم التحقق بنجاح - متابعة الطلب');
         
-        // جلب المستخدم من قاعدة البيانات
         let user = await getUserFromDB(userId);
         let isNewUser = false;
         
-        // 🔥 إذا المستخدم مش موجود، سجله تلقائياً
         if (!user) {
-            console.log('🆕 المستخدم غير موجود - تسجيل تلقائي...');
-            
             const telegramUser = parseTelegramUser(initData);
             
             if (telegramUser?.id) {
@@ -406,17 +252,10 @@ app.get('/api/user/:userId', async (req, res) => {
 
                 user = await createUserInDB(newUser);
                 isNewUser = true;
-                
-                if (user) {
-                    console.log('✅ تم التسجيل التلقائي بنجاح');
-                } else {
-                    console.log('❌ فشل في التسجيل التلقائي');
-                }
             }
         }
 
         if (user) {
-            console.log('✅ تم العثور على المستخدم');
             res.json({ 
                 success: true, 
                 user: {
@@ -428,18 +267,15 @@ app.get('/api/user/:userId', async (req, res) => {
                     dailyAdCount: user.daily_ad_count || 0,
                     totalEarned: parseFloat(user.total_earned || 0)
                 },
-                isNewUser: isNewUser,
-                welcomeMessage: isNewUser ? `🎉 أهلاً وسهلاً ${user.first_name}!` : `مرحباً بعودتك ${user.first_name}!`
+                isNewUser: isNewUser
             });
         } else {
-            console.log('❌ فشل في التسجيل التلقائي');
             res.status(404).json({ 
                 success: false,
-                error: 'User not found - Registration failed' 
+                error: 'User not found' 
             });
         }
     } catch (error) {
-        console.error('❌ خطأ في جلب بيانات المستخدم:', error.message);
         res.status(500).json({ 
             success: false,
             error: 'Failed to get user data' 
@@ -447,118 +283,21 @@ app.get('/api/user/:userId', async (req, res) => {
     }
 });
 
-// 👤 تسجيل مستخدم جديد في قاعدة البيانات
-app.post('/api/register', async (req, res) => {
-    try {
-        const { initData } = req.body;
-
-        console.log('📥 طلب تسجيل مستخدم جديد');
-
-        if (!validateTelegramInitData(initData)) {
-            console.log('❌ فشل التحقق - رفض التسجيل');
-            return res.status(401).json({ 
-                success: false,
-                error: 'Invalid security signature' 
-            });
-        }
-
-        console.log('✅ تم التحقق بنجاح - متابعة التسجيل');
-        
-        const telegramUser = parseTelegramUser(initData);
-        
-        if (!telegramUser?.id) {
-            console.log('❌ بيانات المستخدم غير صالحة');
-            return res.status(400).json({ 
-                success: false,
-                error: 'Invalid user data' 
-            });
-        }
-
-        const userId = telegramUser.id.toString();
-        console.log(`👤 معالجة المستخدم: ${userId}`);
-        
-        // التحقق إذا المستخدم موجود في قاعدة البيانات
-        let user = await getUserFromDB(userId);
-        
-        if (user) {
-            console.log('✅ المستخدم موجود بالفعل');
-            return res.json({ 
-                success: true, 
-                user: {
-                    id: user.telegram_id,
-                    firstName: user.first_name,
-                    username: user.username,
-                    balance: parseFloat(user.balance || 0),
-                    earningWallet: parseFloat(user.earning_wallet || 0),
-                    dailyAdCount: user.daily_ad_count || 0,
-                    totalEarned: parseFloat(user.total_earned || 0)
-                },
-                message: `مرحباً بعودتك ${user.first_name}!`
-            });
-        }
-
-        // إنشاء مستخدم جديد في قاعدة البيانات
-        console.log('🆕 إنشاء مستخدم جديد...');
-        const newUser = {
-            telegram_id: userId,
-            username: telegramUser.username || '',
-            first_name: telegramUser.first_name || 'مستخدم'
-        };
-
-        user = await createUserInDB(newUser);
-
-        if (user) {
-            console.log('✅ تم إنشاء المستخدم بنجاح');
-            res.json({ 
-                success: true, 
-                user: {
-                    id: user.telegram_id,
-                    firstName: user.first_name,
-                    username: user.username,
-                    balance: parseFloat(user.balance || 0),
-                    earningWallet: parseFloat(user.earning_wallet || 0),
-                    dailyAdCount: user.daily_ad_count || 0,
-                    totalEarned: parseFloat(user.total_earned || 0)
-                },
-                message: `🎉 أهلاً وسهلاً ${user.first_name}!`
-            });
-        } else {
-            console.log('❌ فشل في إنشاء المستخدم');
-            res.status(500).json({ 
-                success: false,
-                error: 'Failed to create user' 
-            });
-        }
-
-    } catch (error) {
-        console.error('❌ خطأ في التسجيل:', error.message);
-        res.status(500).json({ 
-            success: false,
-            error: 'Registration failed: ' + error.message 
-        });
-    }
-});
-
-// 📺 مشاهدة إعلان وحفظ في قاعدة البيانات
+// 📺 مشاهدة إعلان
 app.post('/api/watch-ad', async (req, res) => {
     try {
         const { initData } = req.body;
 
-        console.log('📥 طلب مشاهدة إعلان');
-
         if (!validateTelegramInitData(initData)) {
-            console.log('❌ فشل التحقق - رفض مشاهدة الإعلان');
             return res.status(401).json({ 
                 success: false,
                 error: 'Invalid security signature' 
             });
         }
 
-        console.log('✅ تم التحقق بنجاح - متابعة مشاهدة الإعلان');
         const telegramUser = parseTelegramUser(initData);
         
         if (!telegramUser?.id) {
-            console.log('❌ بيانات المستخدم غير صالحة');
             return res.status(400).json({ 
                 success: false,
                 error: 'Invalid user data' 
@@ -566,21 +305,15 @@ app.post('/api/watch-ad', async (req, res) => {
         }
 
         const userId = telegramUser.id.toString();
-        console.log(`👤 معالجة مشاهدة إعلان للمستخدم: ${userId}`);
-        
-        // جلب المستخدم من قاعدة البيانات
         const user = await getUserFromDB(userId);
         if (!user) {
-            console.log('❌ المستخدم غير موجود - يجب التسجيل أولاً');
             return res.status(404).json({ 
                 success: false,
-                error: 'User not found - Please register first' 
+                error: 'User not found' 
             });
         }
 
-        // تحديث البيانات في قاعدة البيانات
         const adReward = config.adValue;
-        console.log(`💰 مكافأة الإعلان: ${adReward} TON`);
         
         const updateResult = await pool.query(
             `UPDATE bot_users SET 
@@ -596,16 +329,13 @@ app.post('/api/watch-ad', async (req, res) => {
         const updatedUser = updateResult.rows[0];
         
         if (updatedUser) {
-            console.log('✅ تمت مشاهدة الإعلان بنجاح');
             res.json({
                 success: true,
                 amount: adReward,
                 earningWallet: parseFloat(updatedUser.earning_wallet || 0),
-                dailyRemaining: config.dailyAdLimit - (updatedUser.daily_ad_count || 0),
-                totalEarned: parseFloat(updatedUser.total_earned || 0)
+                dailyRemaining: config.dailyAdLimit - (updatedUser.daily_ad_count || 0)
             });
         } else {
-            console.log('❌ فشل في معالجة الإعلان');
             res.status(500).json({ 
                 success: false,
                 error: 'Failed to process ad' 
@@ -613,7 +343,6 @@ app.post('/api/watch-ad', async (req, res) => {
         }
 
     } catch (error) {
-        console.error('❌ خطأ في مشاهدة الإعلان:', error.message);
         res.status(500).json({ 
             success: false,
             error: 'Failed to process ad' 
@@ -626,21 +355,16 @@ app.post('/api/move-to-balance', async (req, res) => {
     try {
         const { initData } = req.body;
 
-        console.log('📥 طلب تحويل الرصيد');
-
         if (!validateTelegramInitData(initData)) {
-            console.log('❌ فشل التحقق - رفض التحويل');
             return res.status(401).json({ 
                 success: false,
                 error: 'Invalid security signature' 
             });
         }
 
-        console.log('✅ تم التحقق بنجاح - متابعة التحويل');
         const telegramUser = parseTelegramUser(initData);
         
         if (!telegramUser?.id) {
-            console.log('❌ بيانات المستخدم غير صالحة');
             return res.status(400).json({ 
                 success: false,
                 error: 'Invalid user data' 
@@ -648,12 +372,9 @@ app.post('/api/move-to-balance', async (req, res) => {
         }
 
         const userId = telegramUser.id.toString();
-        console.log(`👤 معالجة تحويل الرصيد للمستخدم: ${userId}`);
-        
         const user = await getUserFromDB(userId);
         
         if (!user) {
-            console.log('❌ المستخدم غير موجود');
             return res.status(404).json({ 
                 success: false,
                 error: 'User not found' 
@@ -661,17 +382,14 @@ app.post('/api/move-to-balance', async (req, res) => {
         }
 
         const earningWallet = parseFloat(user.earning_wallet || 0);
-        console.log(`💰 الرصيد المتاح للتحويل: ${earningWallet} TON`);
         
         if (earningWallet < 0.001) {
-            console.log('❌ الرصيد غير كافي للتحويل');
             return res.status(400).json({ 
                 success: false,
                 error: 'Minimum 0.001 TON required' 
             });
         }
 
-        // تحديث الرصيد في قاعدة البيانات
         const updateResult = await pool.query(
             `UPDATE bot_users SET 
                 balance = COALESCE(balance, 0) + $1,
@@ -684,14 +402,12 @@ app.post('/api/move-to-balance', async (req, res) => {
         const updatedUser = updateResult.rows[0];
         
         if (updatedUser) {
-            console.log('✅ تم تحويل الرصيد بنجاح');
             res.json({
                 success: true,
                 newBalance: parseFloat(updatedUser.balance || 0),
                 earningWallet: 0
             });
         } else {
-            console.log('❌ فشل في تحويل الرصيد');
             res.status(500).json({ 
                 success: false,
                 error: 'Transfer failed' 
@@ -699,7 +415,6 @@ app.post('/api/move-to-balance', async (req, res) => {
         }
 
     } catch (error) {
-        console.error('❌ خطأ في تحويل الرصيد:', error.message);
         res.status(500).json({ 
             success: false,
             error: 'Transfer failed' 
@@ -712,21 +427,16 @@ app.post('/api/withdraw', async (req, res) => {
     try {
         const { initData, amount, walletAddress } = req.body;
 
-        console.log('📥 طلب سحب:', { amount, walletAddress });
-
         if (!validateTelegramInitData(initData)) {
-            console.log('❌ فشل التحقق - رفض السحب');
             return res.status(401).json({ 
                 success: false,
                 error: 'Invalid security signature' 
             });
         }
 
-        console.log('✅ تم التحقق بنجاح - متابعة السحب');
         const telegramUser = parseTelegramUser(initData);
         
         if (!telegramUser?.id) {
-            console.log('❌ بيانات المستخدم غير صالحة');
             return res.status(400).json({ 
                 success: false,
                 error: 'Invalid user data' 
@@ -734,12 +444,8 @@ app.post('/api/withdraw', async (req, res) => {
         }
 
         const userId = telegramUser.id.toString();
-        console.log(`👤 معالجة سحب للمستخدم: ${userId}`);
-        
-        // جلب المستخدم من قاعدة البيانات
         const user = await getUserFromDB(userId);
         if (!user) {
-            console.log('❌ المستخدم غير موجود');
             return res.status(404).json({ 
                 success: false,
                 error: 'User not found' 
@@ -749,40 +455,30 @@ app.post('/api/withdraw', async (req, res) => {
         const userBalance = parseFloat(user.balance || 0);
         const withdrawAmount = parseFloat(amount);
         
-        console.log(`💰 رصيد المستخدم: ${userBalance} TON`);
-        console.log(`💸 مبلغ السحب: ${withdrawAmount} TON`);
-
-        // التحقق من الرصيد
         if (userBalance < withdrawAmount) {
-            console.log('❌ رصيد غير كافي');
             return res.status(400).json({ 
                 success: false,
                 error: 'Insufficient balance' 
             });
         }
 
-        // التحقق من الحد الأدنى للسحب
         if (withdrawAmount < config.minWithdrawal) {
-            console.log(`❌ الحد الأدنى للسحب ${config.minWithdrawal} TON`);
             return res.status(400).json({ 
                 success: false,
                 error: `Minimum withdrawal is ${config.minWithdrawal} TON` 
             });
         }
 
-        // بدء معاملة السحب
         const client = await pool.connect();
         
         try {
             await client.query('BEGIN');
 
-            // خصم المبلغ من رصيد المستخدم
             await client.query(
                 'UPDATE bot_users SET balance = balance - $1 WHERE telegram_id = $2',
                 [withdrawAmount, userId]
             );
 
-            // تسجيل طلب السحب
             const withdrawalResult = await client.query(
                 `INSERT INTO withdrawals 
                  (user_id, amount, wallet_address, status, method) 
@@ -795,13 +491,11 @@ app.post('/api/withdraw', async (req, res) => {
 
             const withdrawal = withdrawalResult.rows[0];
             
-            console.log('✅ تم إنشاء طلب السحب بنجاح:', withdrawal.id);
-            
             res.json({
                 success: true,
                 withdrawalId: withdrawal.id,
                 newBalance: userBalance - withdrawAmount,
-                message: 'تم تقديم طلب السحب بنجاح وسيتم معالجته خلال 24 ساعة'
+                message: 'تم تقديم طلب السحب بنجاح'
             });
 
         } catch (error) {
@@ -812,7 +506,6 @@ app.post('/api/withdraw', async (req, res) => {
         }
 
     } catch (error) {
-        console.error('❌ خطأ في السحب:', error.message);
         res.status(500).json({ 
             success: false,
             error: 'Withdrawal failed: ' + error.message 
@@ -826,19 +519,13 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
         const userId = req.params.userId;
         const initData = req.query.initData;
 
-        console.log(`📥 طلب تاريخ السحوبات للمستخدم: ${userId}`);
-
         if (!validateTelegramInitData(initData)) {
-            console.log('❌ فشل التحقق - رفض الطلب');
             return res.status(401).json({ 
                 success: false,
                 error: 'Invalid security signature' 
             });
         }
-
-        console.log('✅ تم التحقق بنجاح - متابعة الطلب');
         
-        // جلب تاريخ السحوبات
         const withdrawals = await pool.query(
             `SELECT * FROM withdrawals 
              WHERE user_id = $1 
@@ -846,8 +533,6 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
              LIMIT 20`,
             [userId]
         );
-
-        console.log(`📊 عدد السحوبات: ${withdrawals.rows.length}`);
         
         res.json({
             success: true,
@@ -862,10 +547,391 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ خطأ في جلب تاريخ السحوبات:', error.message);
         res.status(500).json({ 
             success: false,
             error: 'Failed to get withdrawal history' 
+        });
+    }
+});
+
+// 📊 لوحة تحكم المسؤول
+app.get('/api/admin/dashboard', async (req, res) => {
+    try {
+        const { admin_key } = req.query;
+        
+        if (!validateAdmin(admin_key)) {
+            return res.status(401).json({ 
+                success: false,
+                error: 'Unauthorized' 
+            });
+        }
+
+        // إحصائيات سريعة
+        const stats = await pool.query(`
+            SELECT 
+                (SELECT COUNT(*) FROM bot_users) as total_users,
+                (SELECT COUNT(*) FROM withdrawals) as total_withdrawals,
+                (SELECT COUNT(*) FROM withdrawals WHERE status = 'pending') as pending_withdrawals,
+                (SELECT COALESCE(SUM(balance), 0) FROM bot_users) as total_balance,
+                (SELECT COALESCE(SUM(amount), 0) FROM withdrawals WHERE status = 'completed') as total_withdrawn,
+                (SELECT COALESCE(SUM(total_earned), 0) FROM bot_users) as total_earned
+        `);
+
+        // آخر المستخدمين المسجلين
+        const recentUsers = await pool.query(`
+            SELECT telegram_id, username, first_name, balance, created_at 
+            FROM bot_users 
+            ORDER BY created_at DESC 
+            LIMIT 10
+        `);
+
+        // آخر طلبات السحب
+        const recentWithdrawals = await pool.query(`
+            SELECT 
+                w.*,
+                u.first_name,
+                u.username
+            FROM withdrawals w
+            LEFT JOIN bot_users u ON w.user_id = u.telegram_id
+            ORDER BY w.created_at DESC 
+            LIMIT 15
+        `);
+
+        // أعلى المستخدمين رصيداً
+        const topUsers = await pool.query(`
+            SELECT telegram_id, username, first_name, balance, total_earned
+            FROM bot_users 
+            ORDER BY balance DESC 
+            LIMIT 10
+        `);
+
+        const statistics = stats.rows[0];
+
+        res.json({
+            success: true,
+            dashboard: {
+                statistics: {
+                    totalUsers: parseInt(statistics.total_users),
+                    totalWithdrawals: parseInt(statistics.total_withdrawals),
+                    pendingWithdrawals: parseInt(statistics.pending_withdrawals),
+                    totalBalance: parseFloat(statistics.total_balance),
+                    totalWithdrawn: parseFloat(statistics.total_withdrawn),
+                    totalEarned: parseFloat(statistics.total_earned)
+                },
+                recentUsers: recentUsers.rows.map(u => ({
+                    id: u.telegram_id,
+                    username: u.username || 'لا يوجد',
+                    firstName: u.first_name,
+                    balance: parseFloat(u.balance),
+                    joinedAt: u.created_at
+                })),
+                recentWithdrawals: recentWithdrawals.rows.map(w => ({
+                    id: w.id,
+                    userId: w.user_id,
+                    userName: w.first_name,
+                    userUsername: w.username || 'لا يوجد',
+                    amount: parseFloat(w.amount),
+                    walletAddress: w.wallet_address,
+                    status: w.status,
+                    createdAt: w.created_at
+                })),
+                topUsers: topUsers.rows.map(u => ({
+                    id: u.telegram_id,
+                    username: u.username || 'لا يوجد',
+                    firstName: u.first_name,
+                    balance: parseFloat(u.balance),
+                    totalEarned: parseFloat(u.total_earned)
+                }))
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ خطأ في لوحة التحكم:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: 'Failed to load dashboard' 
+        });
+    }
+});
+
+// 👥 إدارة المستخدمين
+app.get('/api/admin/users', async (req, res) => {
+    try {
+        const { admin_key, page = 1, limit = 20, search } = req.query;
+        
+        if (!validateAdmin(admin_key)) {
+            return res.status(401).json({ 
+                success: false,
+                error: 'Unauthorized' 
+            });
+        }
+
+        let query = `
+            SELECT 
+                telegram_id, username, first_name, 
+                balance, earning_wallet, total_earned,
+                daily_ad_count, last_ad_date, created_at
+            FROM bot_users 
+        `;
+        let countQuery = `SELECT COUNT(*) FROM bot_users `;
+        let queryParams = [];
+
+        if (search) {
+            query += ` WHERE first_name ILIKE $1 OR username ILIKE $1 OR telegram_id::TEXT ILIKE $1 `;
+            countQuery += ` WHERE first_name ILIKE $1 OR username ILIKE $1 OR telegram_id::TEXT ILIKE $1 `;
+            queryParams.push(`%${search}%`);
+        }
+
+        const offset = (page - 1) * limit;
+        query += ` ORDER BY created_at DESC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
+        queryParams.push(limit, offset);
+
+        const users = await pool.query(query, queryParams);
+        const countResult = await pool.query(countQuery, search ? [queryParams[0]] : []);
+        const totalUsers = parseInt(countResult.rows[0].count);
+
+        res.json({
+            success: true,
+            users: users.rows.map(u => ({
+                id: u.telegram_id,
+                username: u.username || 'لا يوجد',
+                firstName: u.first_name,
+                balance: parseFloat(u.balance),
+                earningWallet: parseFloat(u.earning_wallet),
+                totalEarned: parseFloat(u.total_earned),
+                dailyAdCount: u.daily_ad_count,
+                lastAdDate: u.last_ad_date,
+                joinedAt: u.created_at
+            })),
+            pagination: {
+                page: parseInt(page),
+                limit: parseInt(limit),
+                totalUsers: totalUsers,
+                totalPages: Math.ceil(totalUsers / limit)
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ خطأ في جلب المستخدمين:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: 'Failed to get users' 
+        });
+    }
+});
+
+// 👤 تفاصيل مستخدم معين
+app.get('/api/admin/users/:userId', async (req, res) => {
+    try {
+        const { admin_key } = req.query;
+        const userId = req.params.userId;
+        
+        if (!validateAdmin(admin_key)) {
+            return res.status(401).json({ 
+                success: false,
+                error: 'Unauthorized' 
+            });
+        }
+
+        const userResult = await pool.query(
+            `SELECT * FROM bot_users WHERE telegram_id = $1`,
+            [userId]
+        );
+
+        if (userResult.rows.length === 0) {
+            return res.status(404).json({ 
+                success: false,
+                error: 'User not found' 
+            });
+        }
+
+        const user = userResult.rows[0];
+
+        const withdrawalsResult = await pool.query(
+            `SELECT * FROM withdrawals WHERE user_id = $1 ORDER BY created_at DESC LIMIT 20`,
+            [userId]
+        );
+
+        res.json({
+            success: true,
+            user: {
+                id: user.telegram_id,
+                username: user.username || 'لا يوجد',
+                firstName: user.first_name,
+                balance: parseFloat(user.balance),
+                earningWallet: parseFloat(user.earning_wallet),
+                totalEarned: parseFloat(user.total_earned),
+                dailyAdCount: user.daily_ad_count,
+                lastAdDate: user.last_ad_date,
+                joinedAt: user.created_at
+            },
+            withdrawals: withdrawalsResult.rows.map(w => ({
+                id: w.id,
+                amount: parseFloat(w.amount),
+                walletAddress: w.wallet_address,
+                status: w.status,
+                method: w.method,
+                createdAt: w.created_at
+            }))
+        });
+
+    } catch (error) {
+        console.error('❌ خطأ في جلب تفاصيل المستخدم:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: 'Failed to get user details' 
+        });
+    }
+});
+
+// ✏️ تعديل بيانات مستخدم
+app.put('/api/admin/users/:userId', async (req, res) => {
+    try {
+        const { admin_key, balance, earning_wallet, total_earned } = req.body;
+        const userId = req.params.userId;
+        
+        if (!validateAdmin(admin_key)) {
+            return res.status(401).json({ 
+                success: false,
+                error: 'Unauthorized' 
+            });
+        }
+
+        const result = await pool.query(
+            `UPDATE bot_users SET 
+                balance = COALESCE($1, balance),
+                earning_wallet = COALESCE($2, earning_wallet),
+                total_earned = COALESCE($3, total_earned)
+             WHERE telegram_id = $4 
+             RETURNING *`,
+            [balance, earning_wallet, total_earned, userId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ 
+                success: false,
+                error: 'User not found' 
+            });
+        }
+
+        const updatedUser = result.rows[0];
+
+        res.json({
+            success: true,
+            message: 'تم تحديث بيانات المستخدم بنجاح',
+            user: {
+                id: updatedUser.telegram_id,
+                balance: parseFloat(updatedUser.balance),
+                earningWallet: parseFloat(updatedUser.earning_wallet),
+                totalEarned: parseFloat(updatedUser.total_earned)
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ خطأ في تعديل بيانات المستخدم:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: 'Failed to update user' 
+        });
+    }
+});
+
+// 💳 إدارة طلبات السحب
+app.get('/api/admin/withdrawals', async (req, res) => {
+    try {
+        const { admin_key } = req.query;
+        
+        if (!validateAdmin(admin_key)) {
+            return res.status(401).json({ 
+                success: false,
+                error: 'Unauthorized' 
+            });
+        }
+
+        const withdrawals = await pool.query(`
+            SELECT 
+                w.*,
+                u.first_name,
+                u.username
+            FROM withdrawals w
+            LEFT JOIN bot_users u ON w.user_id = u.telegram_id
+            ORDER BY w.created_at DESC
+        `);
+
+        res.json({
+            success: true,
+            withdrawals: withdrawals.rows.map(w => ({
+                id: w.id,
+                userId: w.user_id,
+                userName: w.first_name,
+                userUsername: w.username || 'لا يوجد',
+                amount: parseFloat(w.amount),
+                walletAddress: w.wallet_address,
+                status: w.status,
+                method: w.method,
+                createdAt: w.created_at
+            }))
+        });
+
+    } catch (error) {
+        console.error('❌ خطأ في جلب طلبات السحب:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: 'Failed to get withdrawals' 
+        });
+    }
+});
+
+// ✅ تحديث حالة السحب
+app.post('/api/admin/withdrawals/:withdrawalId/status', async (req, res) => {
+    try {
+        const { admin_key, status } = req.body;
+        const withdrawalId = req.params.withdrawalId;
+
+        if (!validateAdmin(admin_key)) {
+            return res.status(401).json({ 
+                success: false,
+                error: 'Unauthorized' 
+            });
+        }
+
+        const allowedStatuses = ['pending', 'completed', 'rejected', 'cancelled'];
+        if (!allowedStatuses.includes(status)) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Invalid status' 
+            });
+        }
+
+        const result = await pool.query(
+            `UPDATE withdrawals SET status = $1 WHERE id = $2 RETURNING *`,
+            [status, withdrawalId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ 
+                success: false,
+                error: 'Withdrawal not found' 
+            });
+        }
+
+        const withdrawal = result.rows[0];
+        
+        res.json({
+            success: true,
+            message: `تم تحديث حالة السحب إلى ${status}`,
+            withdrawal: {
+                id: withdrawal.id,
+                status: withdrawal.status,
+                amount: parseFloat(withdrawal.amount)
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ خطأ في تحديث حالة السحب:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: 'Failed to update withdrawal status' 
         });
     }
 });
@@ -877,8 +943,5 @@ app.listen(PORT, HOST, () => {
     console.log(`🟢 TON Rewards Backend running on port ${PORT}`);
     console.log(`💰 Ad reward: ${config.adValue} TON`);
     console.log(`💸 Min withdrawal: ${config.minWithdrawal} TON`);
-    console.log(`🔐 Telegram verification: ENABLED`);
-    
-    // فحص الاتصال بقاعدة البيانات عند البدء
-    checkDatabaseConnection();
-}); 
+    console.log(`🔐 Admin key: ${ADMIN_KEY}`);
+});
