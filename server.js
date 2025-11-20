@@ -3,28 +3,31 @@ const cors = require('cors');
 const crypto = require('crypto');
 const { Pool } = require('pg');
 const querystring = require('querystring');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🎯 البوت توكن
-const BOT_TOKEN = "8257278435:AAHbzrJxIHytXdD1sNftjC8DnDz18kdvbOU";
+// 🔐 إعدادات الأمان
+const BOT_TOKEN = process.env.BOT_TOKEN || "8257278435:AAHbzrJxIHytXdD1sNftjC8DnDz18kdvbOU";
+const JWT_SECRET = process.env.JWT_SECRET || "ton_rewards_secret_key_2024";
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
+const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH || "$2a$10$8K1p/a0dRTlR0d.kY0ZQY.ZZ5x3H3zB5R5QY5x5r5r5r5r5r5r5r5";
 
 // الاتصال بقاعدة البيانات
 const pool = new Pool({
-    connectionString: "postgresql://postgres:EBEXkZAIxdoDqsUNjaYJNcjLdDvuHtSU@maglev.proxy.rlwy.net:12181/railway",
+    connectionString: process.env.DATABASE_URL || "postgresql://postgres:EBEXkZAIxdoDqsUNjaYJNcjLdDvuHtSU@maglev.proxy.rlwy.net:12181/railway",
     ssl: { rejectUnauthorized: false }
 });
 
 const config = {
     adValue: 0.0005,
     dailyAdLimit: 10,
-    minWithdrawal: 0.01
+    minWithdrawal: 0.01,
+    maxWithdrawal: 100
 };
-
-// 🔐 كلمة سر المسؤول
-const ADMIN_KEY = "ywufbpntu";
 
 // 🔧 دالة للتحقق من اتصال قاعدة البيانات
 async function checkDatabaseConnection() {
@@ -36,11 +39,6 @@ async function checkDatabaseConnection() {
         console.error('❌ خطأ في الاتصال بقاعدة البيانات:', error.message);
         return false;
     }
-}
-
-// 🔐 التحقق من المسؤول
-function validateAdmin(admin_key) {
-    return admin_key === ADMIN_KEY;
 }
 
 // 🔐 التحقق من توقيع تليجرام
@@ -100,6 +98,17 @@ function parseTelegramUser(initData) {
     }
 }
 
+// 🔐 التحقق من توكن المسؤول
+function validateAdminToken(token) {
+    try {
+        if (!token) return false;
+        const decoded = jwt.verify(token, JWT_SECRET);
+        return decoded.username === ADMIN_USERNAME;
+    } catch (error) {
+        return false;
+    }
+}
+
 // 📊 جلب المستخدم من قاعدة البيانات
 async function getUserFromDB(userId) {
     try {
@@ -123,8 +132,8 @@ async function createUserInDB(userData) {
         
         const query = `
             INSERT INTO bot_users 
-            (telegram_id, username, first_name, balance, earning_wallet) 
-            VALUES ($1, $2, $3, $4, $5) 
+            (telegram_id, username, first_name, balance, earning_wallet, status) 
+            VALUES ($1, $2, $3, $4, $5, $6) 
             RETURNING *
         `;
         
@@ -133,7 +142,8 @@ async function createUserInDB(userData) {
             userData.username || '',
             userData.first_name || 'مستخدم',
             0,
-            0
+            0,
+            'active'
         ];
 
         const result = await pool.query(query, values);
@@ -144,6 +154,72 @@ async function createUserInDB(userData) {
         return null;
     }
 }
+
+// 🔑 تسجيل دخول المسؤول
+app.post('/api/admin/login', async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        
+        if (!username || !password) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'اسم المستخدم وكلمة المرور مطلوبان' 
+            });
+        }
+
+        // في الإنتاج، استخدم مقارنة آمنة مع الهاش المخزن
+        const isValid = username === ADMIN_USERNAME && 
+                       await bcrypt.compare(password, ADMIN_PASSWORD_HASH);
+
+        if (isValid) {
+            const token = jwt.sign(
+                { username: ADMIN_USERNAME, role: 'admin' },
+                JWT_SECRET,
+                { expiresIn: '24h' }
+            );
+            
+            res.json({
+                success: true,
+                token: token,
+                user: { username: ADMIN_USERNAME, role: 'admin' }
+            });
+        } else {
+            res.status(401).json({ 
+                success: false,
+                error: 'بيانات الدخول غير صحيحة' 
+            });
+        }
+    } catch (error) {
+        res.status(500).json({ 
+            success: false,
+            error: 'فشل في تسجيل الدخول' 
+        });
+    }
+});
+
+// 🔒 التحقق من توكن المسؤول
+app.get('/api/admin/verify', async (req, res) => {
+    try {
+        const token = req.headers.authorization?.replace('Bearer ', '');
+        
+        if (!token || !validateAdminToken(token)) {
+            return res.status(401).json({ 
+                success: false,
+                error: 'غير مصرح بالوصول' 
+            });
+        }
+
+        res.json({
+            success: true,
+            user: { username: ADMIN_USERNAME, role: 'admin' }
+        });
+    } catch (error) {
+        res.status(500).json({ 
+            success: false,
+            error: 'فشل في التحقق' 
+        });
+    }
+});
 
 // 🏠 الصفحة الرئيسية
 app.get('/', async (req, res) => {
@@ -170,7 +246,8 @@ app.get('/api/check-tables', async (req, res) => {
             success: true,
             tables: tableNames,
             hasBotUsers: tableNames.includes('bot_users'),
-            hasWithdrawals: tableNames.includes('withdrawals')
+            hasWithdrawals: tableNames.includes('withdrawals'),
+            hasAdHistory: tableNames.includes('ad_history')
         });
     } catch (error) {
         res.status(500).json({ 
@@ -195,7 +272,10 @@ app.get('/api/setup-database', async (req, res) => {
                 total_earned DECIMAL(15, 8) DEFAULT 0.00000000,
                 daily_ad_count INTEGER DEFAULT 0,
                 last_ad_date DATE DEFAULT CURRENT_DATE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                status VARCHAR(20) DEFAULT 'active',
+                total_ads_watched INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
 
@@ -208,13 +288,49 @@ app.get('/api/setup-database', async (req, res) => {
                 wallet_address TEXT NOT NULL,
                 status VARCHAR(50) DEFAULT 'pending',
                 method VARCHAR(100) DEFAULT 'TON Wallet',
+                admin_notes TEXT,
+                processed_by VARCHAR(255),
+                processed_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
 
+        // إنشاء جدول ad_history إذا مش موجود
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS ad_history (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                amount DECIMAL(15, 8) NOT NULL,
+                ad_type VARCHAR(50) DEFAULT 'video',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // إنشاء جدول admin_logs إذا مش موجود
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS admin_logs (
+                id SERIAL PRIMARY KEY,
+                admin_username VARCHAR(255) NOT NULL,
+                action VARCHAR(255) NOT NULL,
+                target_user_id BIGINT,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // إنشاء الفهارس
+        await pool.query(`
+            CREATE INDEX IF NOT EXISTS idx_bot_users_telegram_id ON bot_users(telegram_id);
+            CREATE INDEX IF NOT EXISTS idx_bot_users_status ON bot_users(status);
+            CREATE INDEX IF NOT EXISTS idx_withdrawals_user_id ON withdrawals(user_id);
+            CREATE INDEX IF NOT EXISTS idx_withdrawals_status ON withdrawals(status);
+            CREATE INDEX IF NOT EXISTS idx_ad_history_user_id ON ad_history(user_id);
+            CREATE INDEX IF NOT EXISTS idx_admin_logs_username ON admin_logs(admin_username);
+        `);
+
         res.json({
             success: true,
-            message: 'تم إنشاء/تحديث الجداول بنجاح'
+            message: 'تم إنشاء/تحديث الجداول والفهارس بنجاح'
         });
     } catch (error) {
         res.status(500).json({
@@ -256,6 +372,12 @@ app.get('/api/user/:userId', async (req, res) => {
         }
 
         if (user) {
+            // جلب تاريخ الإعلانات
+            const adHistory = await pool.query(
+                'SELECT COUNT(*) as total_ads, COALESCE(SUM(amount), 0) as total_earned FROM ad_history WHERE user_id = $1',
+                [userId]
+            );
+
             res.json({ 
                 success: true, 
                 user: {
@@ -265,7 +387,9 @@ app.get('/api/user/:userId', async (req, res) => {
                     balance: parseFloat(user.balance || 0),
                     earningWallet: parseFloat(user.earning_wallet || 0),
                     dailyAdCount: user.daily_ad_count || 0,
-                    totalEarned: parseFloat(user.total_earned || 0)
+                    totalEarned: parseFloat(user.total_earned || 0),
+                    totalAdsWatched: parseInt(adHistory.rows[0].total_ads || 0),
+                    status: user.status || 'active'
                 },
                 isNewUser: isNewUser
             });
@@ -313,33 +437,78 @@ app.post('/api/watch-ad', async (req, res) => {
             });
         }
 
+        // التحقق من حالة المستخدم
+        if (user.status !== 'active') {
+            return res.status(403).json({ 
+                success: false,
+                error: 'الحساب موقوف ولا يمكن مشاهدة الإعلانات' 
+            });
+        }
+
+        // التحقق من الحد اليومي
+        const today = new Date().toISOString().split('T')[0];
+        const lastAdDate = user.last_ad_date ? new Date(user.last_ad_date).toISOString().split('T')[0] : null;
+        
+        if (lastAdDate !== today) {
+            // إعادة تعيين العداد اليومي
+            await pool.query(
+                'UPDATE bot_users SET daily_ad_count = 0, last_ad_date = CURRENT_DATE WHERE telegram_id = $1',
+                [userId]
+            );
+            user.daily_ad_count = 0;
+        }
+
+        if (user.daily_ad_count >= config.dailyAdLimit) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'لقد وصلت إلى الحد اليومي لمشاهدة الإعلانات' 
+            });
+        }
+
         const adReward = config.adValue;
         
-        const updateResult = await pool.query(
-            `UPDATE bot_users SET 
-                earning_wallet = COALESCE(earning_wallet, 0) + $1,
-                total_earned = COALESCE(total_earned, 0) + $1,
-                daily_ad_count = COALESCE(daily_ad_count, 0) + 1,
-                last_ad_date = CURRENT_DATE
-             WHERE telegram_id = $2 
-             RETURNING *`,
-            [adReward, userId]
-        );
-
-        const updatedUser = updateResult.rows[0];
+        const client = await pool.connect();
         
-        if (updatedUser) {
+        try {
+            await client.query('BEGIN');
+
+            // تحديث بيانات المستخدم
+            const updateResult = await client.query(
+                `UPDATE bot_users SET 
+                    earning_wallet = COALESCE(earning_wallet, 0) + $1,
+                    total_earned = COALESCE(total_earned, 0) + $1,
+                    daily_ad_count = COALESCE(daily_ad_count, 0) + 1,
+                    total_ads_watched = COALESCE(total_ads_watched, 0) + 1,
+                    last_ad_date = CURRENT_DATE
+                 WHERE telegram_id = $2 
+                 RETURNING *`,
+                [adReward, userId]
+            );
+
+            // تسجيل في تاريخ الإعلانات
+            await client.query(
+                `INSERT INTO ad_history (user_id, amount, ad_type) 
+                 VALUES ($1, $2, $3)`,
+                [userId, adReward, 'video']
+            );
+
+            await client.query('COMMIT');
+
+            const updatedUser = updateResult.rows[0];
+            
             res.json({
                 success: true,
                 amount: adReward,
                 earningWallet: parseFloat(updatedUser.earning_wallet || 0),
-                dailyRemaining: config.dailyAdLimit - (updatedUser.daily_ad_count || 0)
+                dailyRemaining: config.dailyAdLimit - (updatedUser.daily_ad_count || 0),
+                totalAds: updatedUser.total_ads_watched || 0
             });
-        } else {
-            res.status(500).json({ 
-                success: false,
-                error: 'Failed to process ad' 
-            });
+
+        } catch (error) {
+            await client.query('ROLLBACK');
+            throw error;
+        } finally {
+            client.release();
         }
 
     } catch (error) {
@@ -452,6 +621,14 @@ app.post('/api/withdraw', async (req, res) => {
             });
         }
 
+        // التحقق من حالة المستخدم
+        if (user.status !== 'active') {
+            return res.status(403).json({ 
+                success: false,
+                error: 'الحساب موقوف ولا يمكن طلب السحب' 
+            });
+        }
+
         const userBalance = parseFloat(user.balance || 0);
         const withdrawAmount = parseFloat(amount);
         
@@ -466,6 +643,13 @@ app.post('/api/withdraw', async (req, res) => {
             return res.status(400).json({ 
                 success: false,
                 error: `Minimum withdrawal is ${config.minWithdrawal} TON` 
+            });
+        }
+
+        if (withdrawAmount > config.maxWithdrawal) {
+            return res.status(400).json({ 
+                success: false,
+                error: `Maximum withdrawal is ${config.maxWithdrawal} TON` 
             });
         }
 
@@ -557,12 +741,12 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
 // 📊 لوحة تحكم المسؤول
 app.get('/api/admin/dashboard', async (req, res) => {
     try {
-        const { admin_key } = req.query;
+        const token = req.headers.authorization?.replace('Bearer ', '');
         
-        if (!validateAdmin(admin_key)) {
+        if (!token || !validateAdminToken(token)) {
             return res.status(401).json({ 
                 success: false,
-                error: 'Unauthorized' 
+                error: 'غير مصرح بالوصول' 
             });
         }
 
@@ -570,16 +754,30 @@ app.get('/api/admin/dashboard', async (req, res) => {
         const stats = await pool.query(`
             SELECT 
                 (SELECT COUNT(*) FROM bot_users) as total_users,
+                (SELECT COUNT(*) FROM bot_users WHERE status = 'active') as active_users,
+                (SELECT COUNT(*) FROM bot_users WHERE status = 'banned') as banned_users,
                 (SELECT COUNT(*) FROM withdrawals) as total_withdrawals,
                 (SELECT COUNT(*) FROM withdrawals WHERE status = 'pending') as pending_withdrawals,
+                (SELECT COUNT(*) FROM withdrawals WHERE status = 'completed') as completed_withdrawals,
                 (SELECT COALESCE(SUM(balance), 0) FROM bot_users) as total_balance,
                 (SELECT COALESCE(SUM(amount), 0) FROM withdrawals WHERE status = 'completed') as total_withdrawn,
-                (SELECT COALESCE(SUM(total_earned), 0) FROM bot_users) as total_earned
+                (SELECT COALESCE(SUM(total_earned), 0) FROM bot_users) as total_earned,
+                (SELECT COALESCE(SUM(amount), 0) FROM ad_history) as total_ads_reward,
+                (SELECT COUNT(*) FROM ad_history) as total_ads_watched
+        `);
+
+        // إحصائيات اليوم
+        const todayStats = await pool.query(`
+            SELECT 
+                (SELECT COUNT(*) FROM bot_users WHERE DATE(created_at) = CURRENT_DATE) as new_users_today,
+                (SELECT COUNT(*) FROM ad_history WHERE DATE(created_at) = CURRENT_DATE) as ads_today,
+                (SELECT COALESCE(SUM(amount), 0) FROM ad_history WHERE DATE(created_at) = CURRENT_DATE) as ads_reward_today,
+                (SELECT COUNT(*) FROM withdrawals WHERE DATE(created_at) = CURRENT_DATE) as withdrawals_today
         `);
 
         // آخر المستخدمين المسجلين
         const recentUsers = await pool.query(`
-            SELECT telegram_id, username, first_name, balance, created_at 
+            SELECT telegram_id, username, first_name, balance, total_earned, total_ads_watched, created_at 
             FROM bot_users 
             ORDER BY created_at DESC 
             LIMIT 10
@@ -599,30 +797,44 @@ app.get('/api/admin/dashboard', async (req, res) => {
 
         // أعلى المستخدمين رصيداً
         const topUsers = await pool.query(`
-            SELECT telegram_id, username, first_name, balance, total_earned
+            SELECT telegram_id, username, first_name, balance, total_earned, total_ads_watched
             FROM bot_users 
             ORDER BY balance DESC 
             LIMIT 10
         `);
 
         const statistics = stats.rows[0];
+        const today = todayStats.rows[0];
 
         res.json({
             success: true,
             dashboard: {
                 statistics: {
                     totalUsers: parseInt(statistics.total_users),
+                    activeUsers: parseInt(statistics.active_users),
+                    bannedUsers: parseInt(statistics.banned_users),
                     totalWithdrawals: parseInt(statistics.total_withdrawals),
                     pendingWithdrawals: parseInt(statistics.pending_withdrawals),
+                    completedWithdrawals: parseInt(statistics.completed_withdrawals),
                     totalBalance: parseFloat(statistics.total_balance),
                     totalWithdrawn: parseFloat(statistics.total_withdrawn),
-                    totalEarned: parseFloat(statistics.total_earned)
+                    totalEarned: parseFloat(statistics.total_earned),
+                    totalAdsReward: parseFloat(statistics.total_ads_reward),
+                    totalAdsWatched: parseInt(statistics.total_ads_watched)
+                },
+                todayStats: {
+                    newUsers: parseInt(today.new_users_today),
+                    adsWatched: parseInt(today.ads_today),
+                    adsReward: parseFloat(today.ads_reward_today),
+                    withdrawals: parseInt(today.withdrawals_today)
                 },
                 recentUsers: recentUsers.rows.map(u => ({
                     id: u.telegram_id,
                     username: u.username || 'لا يوجد',
                     firstName: u.first_name,
                     balance: parseFloat(u.balance),
+                    totalEarned: parseFloat(u.total_earned),
+                    totalAds: u.total_ads_watched || 0,
                     joinedAt: u.created_at
                 })),
                 recentWithdrawals: recentWithdrawals.rows.map(w => ({
@@ -640,7 +852,8 @@ app.get('/api/admin/dashboard', async (req, res) => {
                     username: u.username || 'لا يوجد',
                     firstName: u.first_name,
                     balance: parseFloat(u.balance),
-                    totalEarned: parseFloat(u.total_earned)
+                    totalEarned: parseFloat(u.total_earned),
+                    totalAds: u.total_ads_watched || 0
                 }))
             }
         });
@@ -657,37 +870,51 @@ app.get('/api/admin/dashboard', async (req, res) => {
 // 👥 إدارة المستخدمين
 app.get('/api/admin/users', async (req, res) => {
     try {
-        const { admin_key, page = 1, limit = 20, search } = req.query;
+        const token = req.headers.authorization?.replace('Bearer ', '');
         
-        if (!validateAdmin(admin_key)) {
+        if (!token || !validateAdminToken(token)) {
             return res.status(401).json({ 
                 success: false,
-                error: 'Unauthorized' 
+                error: 'غير مصرح بالوصول' 
             });
         }
+
+        const { page = 1, limit = 20, search, status } = req.query;
 
         let query = `
             SELECT 
                 telegram_id, username, first_name, 
                 balance, earning_wallet, total_earned,
-                daily_ad_count, last_ad_date, created_at
+                daily_ad_count, total_ads_watched, last_ad_date, 
+                status, created_at
             FROM bot_users 
         `;
         let countQuery = `SELECT COUNT(*) FROM bot_users `;
         let queryParams = [];
+        let conditions = [];
 
         if (search) {
-            query += ` WHERE first_name ILIKE $1 OR username ILIKE $1 OR telegram_id::TEXT ILIKE $1 `;
-            countQuery += ` WHERE first_name ILIKE $1 OR username ILIKE $1 OR telegram_id::TEXT ILIKE $1 `;
+            conditions.push(`(first_name ILIKE $${conditions.length + 1} OR username ILIKE $${conditions.length + 1} OR telegram_id::TEXT ILIKE $${conditions.length + 1})`);
             queryParams.push(`%${search}%`);
+        }
+
+        if (status && status !== 'all') {
+            conditions.push(`status = $${conditions.length + 1}`);
+            queryParams.push(status);
+        }
+
+        if (conditions.length > 0) {
+            const whereClause = ' WHERE ' + conditions.join(' AND ');
+            query += whereClause;
+            countQuery += whereClause;
         }
 
         const offset = (page - 1) * limit;
         query += ` ORDER BY created_at DESC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
-        queryParams.push(limit, offset);
+        queryParams.push(parseInt(limit), offset);
 
         const users = await pool.query(query, queryParams);
-        const countResult = await pool.query(countQuery, search ? [queryParams[0]] : []);
+        const countResult = await pool.query(countQuery, queryParams.slice(0, -2));
         const totalUsers = parseInt(countResult.rows[0].count);
 
         res.json({
@@ -700,7 +927,9 @@ app.get('/api/admin/users', async (req, res) => {
                 earningWallet: parseFloat(u.earning_wallet),
                 totalEarned: parseFloat(u.total_earned),
                 dailyAdCount: u.daily_ad_count,
+                totalAdsWatched: u.total_ads_watched || 0,
                 lastAdDate: u.last_ad_date,
+                status: u.status || 'active',
                 joinedAt: u.created_at
             })),
             pagination: {
@@ -723,15 +952,16 @@ app.get('/api/admin/users', async (req, res) => {
 // 👤 تفاصيل مستخدم معين
 app.get('/api/admin/users/:userId', async (req, res) => {
     try {
-        const { admin_key } = req.query;
-        const userId = req.params.userId;
+        const token = req.headers.authorization?.replace('Bearer ', '');
         
-        if (!validateAdmin(admin_key)) {
+        if (!token || !validateAdminToken(token)) {
             return res.status(401).json({ 
                 success: false,
-                error: 'Unauthorized' 
+                error: 'غير مصرح بالوصول' 
             });
         }
+
+        const userId = req.params.userId;
 
         const userResult = await pool.query(
             `SELECT * FROM bot_users WHERE telegram_id = $1`,
@@ -747,8 +977,32 @@ app.get('/api/admin/users/:userId', async (req, res) => {
 
         const user = userResult.rows[0];
 
+        // جلب تاريخ الإعلانات
+        const adHistory = await pool.query(
+            `SELECT * FROM ad_history 
+             WHERE user_id = $1 
+             ORDER BY created_at DESC 
+             LIMIT 50`,
+            [userId]
+        );
+
+        // جلب تاريخ السحوبات
         const withdrawalsResult = await pool.query(
-            `SELECT * FROM withdrawals WHERE user_id = $1 ORDER BY created_at DESC LIMIT 20`,
+            `SELECT * FROM withdrawals 
+             WHERE user_id = $1 
+             ORDER BY created_at DESC 
+             LIMIT 20`,
+            [userId]
+        );
+
+        // إحصائيات الإعلانات
+        const adStats = await pool.query(
+            `SELECT 
+                COUNT(*) as total_ads,
+                COALESCE(SUM(amount), 0) as total_earned,
+                COUNT(DISTINCT DATE(created_at)) as active_days
+             FROM ad_history 
+             WHERE user_id = $1`,
             [userId]
         );
 
@@ -762,9 +1016,22 @@ app.get('/api/admin/users/:userId', async (req, res) => {
                 earningWallet: parseFloat(user.earning_wallet),
                 totalEarned: parseFloat(user.total_earned),
                 dailyAdCount: user.daily_ad_count,
+                totalAdsWatched: user.total_ads_watched || 0,
                 lastAdDate: user.last_ad_date,
+                status: user.status || 'active',
                 joinedAt: user.created_at
             },
+            adStats: {
+                totalAds: parseInt(adStats.rows[0].total_ads),
+                totalEarned: parseFloat(adStats.rows[0].total_earned),
+                activeDays: parseInt(adStats.rows[0].active_days)
+            },
+            adHistory: adHistory.rows.map(ad => ({
+                id: ad.id,
+                amount: parseFloat(ad.amount),
+                adType: ad.ad_type,
+                createdAt: ad.created_at
+            })),
             withdrawals: withdrawalsResult.rows.map(w => ({
                 id: w.id,
                 amount: parseFloat(w.amount),
@@ -787,24 +1054,31 @@ app.get('/api/admin/users/:userId', async (req, res) => {
 // ✏️ تعديل بيانات مستخدم
 app.put('/api/admin/users/:userId', async (req, res) => {
     try {
-        const { admin_key, balance, earning_wallet, total_earned } = req.body;
-        const userId = req.params.userId;
+        const token = req.headers.authorization?.replace('Bearer ', '');
         
-        if (!validateAdmin(admin_key)) {
+        if (!token || !validateAdminToken(token)) {
             return res.status(401).json({ 
                 success: false,
-                error: 'Unauthorized' 
+                error: 'غير مصرح بالوصول' 
             });
         }
+
+        const { balance, earning_wallet, total_earned, status } = req.body;
+        const userId = req.params.userId;
+
+        const decoded = jwt.verify(token, JWT_SECRET);
+        const adminUsername = decoded.username;
 
         const result = await pool.query(
             `UPDATE bot_users SET 
                 balance = COALESCE($1, balance),
                 earning_wallet = COALESCE($2, earning_wallet),
-                total_earned = COALESCE($3, total_earned)
-             WHERE telegram_id = $4 
+                total_earned = COALESCE($3, total_earned),
+                status = COALESCE($4, status),
+                updated_at = CURRENT_TIMESTAMP
+             WHERE telegram_id = $5 
              RETURNING *`,
-            [balance, earning_wallet, total_earned, userId]
+            [balance, earning_wallet, total_earned, status, userId]
         );
 
         if (result.rows.length === 0) {
@@ -813,6 +1087,13 @@ app.put('/api/admin/users/:userId', async (req, res) => {
                 error: 'User not found' 
             });
         }
+
+        // تسجيل الإجراء
+        await pool.query(
+            `INSERT INTO admin_logs (admin_username, action, target_user_id, details) 
+             VALUES ($1, $2, $3, $4)`,
+            [adminUsername, 'UPDATE_USER', userId, `تم تحديث بيانات المستخدم ${userId}`]
+        );
 
         const updatedUser = result.rows[0];
 
@@ -823,7 +1104,8 @@ app.put('/api/admin/users/:userId', async (req, res) => {
                 id: updatedUser.telegram_id,
                 balance: parseFloat(updatedUser.balance),
                 earningWallet: parseFloat(updatedUser.earning_wallet),
-                totalEarned: parseFloat(updatedUser.total_earned)
+                totalEarned: parseFloat(updatedUser.total_earned),
+                status: updatedUser.status
             }
         });
 
@@ -836,27 +1118,304 @@ app.put('/api/admin/users/:userId', async (req, res) => {
     }
 });
 
-// 💳 إدارة طلبات السحب
-app.get('/api/admin/withdrawals', async (req, res) => {
+// ➕ إضافة رصيد للمستخدم
+app.post('/api/admin/users/:userId/add-balance', async (req, res) => {
     try {
-        const { admin_key } = req.query;
+        const token = req.headers.authorization?.replace('Bearer ', '');
         
-        if (!validateAdmin(admin_key)) {
+        if (!token || !validateAdminToken(token)) {
             return res.status(401).json({ 
                 success: false,
-                error: 'Unauthorized' 
+                error: 'غير مصرح بالوصول' 
             });
         }
 
-        const withdrawals = await pool.query(`
+        const { amount, notes } = req.body;
+        const userId = req.params.userId;
+
+        const decoded = jwt.verify(token, JWT_SECRET);
+        const adminUsername = decoded.username;
+
+        if (!amount || amount <= 0) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'المبلغ غير صالح' 
+            });
+        }
+
+        const client = await pool.connect();
+        
+        try {
+            await client.query('BEGIN');
+
+            const result = await client.query(
+                `UPDATE bot_users SET 
+                    balance = COALESCE(balance, 0) + $1,
+                    total_earned = COALESCE(total_earned, 0) + $1,
+                    updated_at = CURRENT_TIMESTAMP
+                 WHERE telegram_id = $2 
+                 RETURNING *`,
+                [parseFloat(amount), userId]
+            );
+
+            if (result.rows.length === 0) {
+                throw new Error('User not found');
+            }
+
+            // تسجيل الإجراء
+            await client.query(
+                `INSERT INTO admin_logs (admin_username, action, target_user_id, details) 
+                 VALUES ($1, $2, $3, $4)`,
+                [adminUsername, 'ADD_BALANCE', userId, `تم إضافة ${amount} TON للمستخدم. الملاحظات: ${notes || 'لا يوجد'}`]
+            );
+
+            await client.query('COMMIT');
+
+            const updatedUser = result.rows[0];
+            
+            res.json({
+                success: true,
+                message: `تم إضافة ${amount} TON بنجاح`,
+                user: {
+                    id: updatedUser.telegram_id,
+                    balance: parseFloat(updatedUser.balance),
+                    totalEarned: parseFloat(updatedUser.total_earned)
+                }
+            });
+
+        } catch (error) {
+            await client.query('ROLLBACK');
+            throw error;
+        } finally {
+            client.release();
+        }
+
+    } catch (error) {
+        console.error('❌ خطأ في إضافة الرصيد:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: 'Failed to add balance' 
+        });
+    }
+});
+
+// ➖ خصم رصيد من المستخدم
+app.post('/api/admin/users/:userId/deduct-balance', async (req, res) => {
+    try {
+        const token = req.headers.authorization?.replace('Bearer ', '');
+        
+        if (!token || !validateAdminToken(token)) {
+            return res.status(401).json({ 
+                success: false,
+                error: 'غير مصرح بالوصول' 
+            });
+        }
+
+        const { amount, notes } = req.body;
+        const userId = req.params.userId;
+
+        const decoded = jwt.verify(token, JWT_SECRET);
+        const adminUsername = decoded.username;
+
+        if (!amount || amount <= 0) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'المبلغ غير صالح' 
+            });
+        }
+
+        const client = await pool.connect();
+        
+        try {
+            await client.query('BEGIN');
+
+            // التحقق من الرصيد الكافي
+            const userResult = await client.query(
+                'SELECT balance FROM bot_users WHERE telegram_id = $1',
+                [userId]
+            );
+
+            if (userResult.rows.length === 0) {
+                throw new Error('User not found');
+            }
+
+            const currentBalance = parseFloat(userResult.rows[0].balance);
+            if (currentBalance < amount) {
+                throw new Error('الرصيد غير كافي للخصم');
+            }
+
+            const result = await client.query(
+                `UPDATE bot_users SET 
+                    balance = COALESCE(balance, 0) - $1,
+                    updated_at = CURRENT_TIMESTAMP
+                 WHERE telegram_id = $2 
+                 RETURNING *`,
+                [parseFloat(amount), userId]
+            );
+
+            // تسجيل الإجراء
+            await client.query(
+                `INSERT INTO admin_logs (admin_username, action, target_user_id, details) 
+                 VALUES ($1, $2, $3, $4)`,
+                [adminUsername, 'DEDUCT_BALANCE', userId, `تم خصم ${amount} TON من المستخدم. الملاحظات: ${notes || 'لا يوجد'}`]
+            );
+
+            await client.query('COMMIT');
+
+            const updatedUser = result.rows[0];
+            
+            res.json({
+                success: true,
+                message: `تم خصم ${amount} TON بنجاح`,
+                user: {
+                    id: updatedUser.telegram_id,
+                    balance: parseFloat(updatedUser.balance)
+                }
+            });
+
+        } catch (error) {
+            await client.query('ROLLBACK');
+            throw error;
+        } finally {
+            client.release();
+        }
+
+    } catch (error) {
+        console.error('❌ خطأ في خصم الرصيد:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: error.message 
+        });
+    }
+});
+
+// 🚫 حظر/فك حظر مستخدم
+app.post('/api/admin/users/:userId/toggle-ban', async (req, res) => {
+    try {
+        const token = req.headers.authorization?.replace('Bearer ', '');
+        
+        if (!token || !validateAdminToken(token)) {
+            return res.status(401).json({ 
+                success: false,
+                error: 'غير مصرح بالوصول' 
+            });
+        }
+
+        const { reason } = req.body;
+        const userId = req.params.userId;
+
+        const decoded = jwt.verify(token, JWT_SECRET);
+        const adminUsername = decoded.username;
+
+        const client = await pool.connect();
+        
+        try {
+            await client.query('BEGIN');
+
+            // جلب الحالة الحالية
+            const userResult = await client.query(
+                'SELECT status FROM bot_users WHERE telegram_id = $1',
+                [userId]
+            );
+
+            if (userResult.rows.length === 0) {
+                throw new Error('User not found');
+            }
+
+            const currentStatus = userResult.rows[0].status;
+            const newStatus = currentStatus === 'active' ? 'banned' : 'active';
+            const action = newStatus === 'banned' ? 'حظر' : 'فك الحظر';
+
+            const result = await client.query(
+                `UPDATE bot_users SET 
+                    status = $1,
+                    updated_at = CURRENT_TIMESTAMP
+                 WHERE telegram_id = $2 
+                 RETURNING *`,
+                [newStatus, userId]
+            );
+
+            // تسجيل الإجراء
+            await client.query(
+                `INSERT INTO admin_logs (admin_username, action, target_user_id, details) 
+                 VALUES ($1, $2, $3, $4)`,
+                [adminUsername, 'TOGGLE_BAN', userId, `${action} المستخدم. السبب: ${reason || 'لا يوجد'}`]
+            );
+
+            await client.query('COMMIT');
+
+            const updatedUser = result.rows[0];
+            
+            res.json({
+                success: true,
+                message: `تم ${action} المستخدم بنجاح`,
+                user: {
+                    id: updatedUser.telegram_id,
+                    status: updatedUser.status
+                }
+            });
+
+        } catch (error) {
+            await client.query('ROLLBACK');
+            throw error;
+        } finally {
+            client.release();
+        }
+
+    } catch (error) {
+        console.error('❌ خطأ في تغيير حالة المستخدم:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: error.message 
+        });
+    }
+});
+
+// 💳 إدارة طلبات السحب
+app.get('/api/admin/withdrawals', async (req, res) => {
+    try {
+        const token = req.headers.authorization?.replace('Bearer ', '');
+        
+        if (!token || !validateAdminToken(token)) {
+            return res.status(401).json({ 
+                success: false,
+                error: 'غير مصرح بالوصول' 
+            });
+        }
+
+        const { status, page = 1, limit = 20 } = req.query;
+
+        let query = `
             SELECT 
                 w.*,
                 u.first_name,
-                u.username
+                u.username,
+                u.status as user_status
             FROM withdrawals w
             LEFT JOIN bot_users u ON w.user_id = u.telegram_id
-            ORDER BY w.created_at DESC
-        `);
+        `;
+        let countQuery = `SELECT COUNT(*) FROM withdrawals w LEFT JOIN bot_users u ON w.user_id = u.telegram_id `;
+        let queryParams = [];
+        let conditions = [];
+
+        if (status && status !== 'all') {
+            conditions.push(`w.status = $${conditions.length + 1}`);
+            queryParams.push(status);
+        }
+
+        if (conditions.length > 0) {
+            const whereClause = ' WHERE ' + conditions.join(' AND ');
+            query += whereClause;
+            countQuery += whereClause;
+        }
+
+        const offset = (page - 1) * limit;
+        query += ` ORDER BY w.created_at DESC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
+        queryParams.push(parseInt(limit), offset);
+
+        const withdrawals = await pool.query(query, queryParams);
+        const countResult = await pool.query(countQuery, queryParams.slice(0, -2));
+        const totalWithdrawals = parseInt(countResult.rows[0].count);
 
         res.json({
             success: true,
@@ -865,12 +1424,22 @@ app.get('/api/admin/withdrawals', async (req, res) => {
                 userId: w.user_id,
                 userName: w.first_name,
                 userUsername: w.username || 'لا يوجد',
+                userStatus: w.user_status,
                 amount: parseFloat(w.amount),
                 walletAddress: w.wallet_address,
                 status: w.status,
                 method: w.method,
+                adminNotes: w.admin_notes,
+                processedBy: w.processed_by,
+                processedAt: w.processed_at,
                 createdAt: w.created_at
-            }))
+            })),
+            pagination: {
+                page: parseInt(page),
+                limit: parseInt(limit),
+                totalWithdrawals: totalWithdrawals,
+                totalPages: Math.ceil(totalWithdrawals / limit)
+            }
         });
 
     } catch (error) {
@@ -885,15 +1454,20 @@ app.get('/api/admin/withdrawals', async (req, res) => {
 // ✅ تحديث حالة السحب
 app.post('/api/admin/withdrawals/:withdrawalId/status', async (req, res) => {
     try {
-        const { admin_key, status } = req.body;
-        const withdrawalId = req.params.withdrawalId;
-
-        if (!validateAdmin(admin_key)) {
+        const token = req.headers.authorization?.replace('Bearer ', '');
+        
+        if (!token || !validateAdminToken(token)) {
             return res.status(401).json({ 
                 success: false,
-                error: 'Unauthorized' 
+                error: 'غير مصرح بالوصول' 
             });
         }
+
+        const { status, admin_notes } = req.body;
+        const withdrawalId = req.params.withdrawalId;
+
+        const decoded = jwt.verify(token, JWT_SECRET);
+        const adminUsername = decoded.username;
 
         const allowedStatuses = ['pending', 'completed', 'rejected', 'cancelled'];
         if (!allowedStatuses.includes(status)) {
@@ -903,35 +1477,115 @@ app.post('/api/admin/withdrawals/:withdrawalId/status', async (req, res) => {
             });
         }
 
-        const result = await pool.query(
-            `UPDATE withdrawals SET status = $1 WHERE id = $2 RETURNING *`,
-            [status, withdrawalId]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({ 
-                success: false,
-                error: 'Withdrawal not found' 
-            });
-        }
-
-        const withdrawal = result.rows[0];
+        const client = await pool.connect();
         
-        res.json({
-            success: true,
-            message: `تم تحديث حالة السحب إلى ${status}`,
-            withdrawal: {
-                id: withdrawal.id,
-                status: withdrawal.status,
-                amount: parseFloat(withdrawal.amount)
+        try {
+            await client.query('BEGIN');
+
+            const result = await client.query(
+                `UPDATE withdrawals SET 
+                    status = $1,
+                    admin_notes = $2,
+                    processed_by = $3,
+                    processed_at = CASE WHEN $1 != 'pending' THEN CURRENT_TIMESTAMP ELSE NULL END
+                 WHERE id = $4 
+                 RETURNING *`,
+                [status, admin_notes, adminUsername, withdrawalId]
+            );
+
+            if (result.rows.length === 0) {
+                throw new Error('Withdrawal not found');
             }
-        });
+
+            const withdrawal = result.rows[0];
+
+            // تسجيل الإجراء
+            await client.query(
+                `INSERT INTO admin_logs (admin_username, action, target_user_id, details) 
+                 VALUES ($1, $2, $3, $4)`,
+                [adminUsername, 'UPDATE_WITHDRAWAL', withdrawal.user_id, `تم تحديث حالة السحب #${withdrawalId} إلى ${status}. الملاحظات: ${admin_notes || 'لا يوجد'}`]
+            );
+
+            await client.query('COMMIT');
+            
+            res.json({
+                success: true,
+                message: `تم تحديث حالة السحب إلى ${status}`,
+                withdrawal: {
+                    id: withdrawal.id,
+                    status: withdrawal.status,
+                    amount: parseFloat(withdrawal.amount),
+                    adminNotes: withdrawal.admin_notes,
+                    processedBy: withdrawal.processed_by,
+                    processedAt: withdrawal.processed_at
+                }
+            });
+
+        } catch (error) {
+            await client.query('ROLLBACK');
+            throw error;
+        } finally {
+            client.release();
+        }
 
     } catch (error) {
         console.error('❌ خطأ في تحديث حالة السحب:', error.message);
         res.status(500).json({ 
             success: false,
-            error: 'Failed to update withdrawal status' 
+            error: error.message 
+        });
+    }
+});
+
+// 📝 جلب سجل الإجراءات
+app.get('/api/admin/logs', async (req, res) => {
+    try {
+        const token = req.headers.authorization?.replace('Bearer ', '');
+        
+        if (!token || !validateAdminToken(token)) {
+            return res.status(401).json({ 
+                success: false,
+                error: 'غير مصرح بالوصول' 
+            });
+        }
+
+        const { page = 1, limit = 50 } = req.query;
+
+        const offset = (page - 1) * limit;
+
+        const logs = await pool.query(`
+            SELECT * FROM admin_logs 
+            ORDER BY created_at DESC 
+            LIMIT $1 OFFSET $2`,
+            [parseInt(limit), offset]
+        );
+
+        const countResult = await pool.query('SELECT COUNT(*) FROM admin_logs');
+        const totalLogs = parseInt(countResult.rows[0].count);
+
+        res.json({
+            success: true,
+            logs: logs.rows.map(log => ({
+                id: log.id,
+                adminUsername: log.admin_username,
+                action: log.action,
+                targetUserId: log.target_user_id,
+                details: log.details,
+                createdAt: log.created_at
+            })),
+            pagination: {
+                page: parseInt(page),
+                limit: parseInt(limit),
+                totalLogs: totalLogs,
+                totalPages: Math.ceil(totalLogs / limit)
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ خطأ في جلب السجلات:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: 'Failed to get logs' 
         });
     }
 });
@@ -943,5 +1597,6 @@ app.listen(PORT, HOST, () => {
     console.log(`🟢 TON Rewards Backend running on port ${PORT}`);
     console.log(`💰 Ad reward: ${config.adValue} TON`);
     console.log(`💸 Min withdrawal: ${config.minWithdrawal} TON`);
-    console.log(`🔐 Admin key: ${ADMIN_KEY}`);
+    console.log(`🔐 Admin username: ${ADMIN_USERNAME}`);
+    console.log(`🔑 JWT Secret: ${JWT_SECRET ? '✅ Set' : '❌ Not set'}`);
 });
