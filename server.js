@@ -18,9 +18,9 @@ const pool = new Pool({
 });
 
 const config = {
-    adValue: 0.0005,
-    dailyAdLimit: 10,
-    minWithdrawal: 0.01
+    adValue: 0.0001,
+    dailyAdLimit: 100,
+    minWithdrawal: 0.0001
 };
 
 // 🔐 نظام التوكن الديناميكي كل 10 ثواني
