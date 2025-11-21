@@ -17,10 +17,11 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
+// 🔥 الإعدادات الجديدة - 100 إعلان يومياً
 const config = {
-    adValue: 0.0001,
-    dailyAdLimit: 100,
-    minWithdrawal: 0.0001
+    adValue: 0.0001,          // 0.0001 TON لكل إعلان
+    dailyAdLimit: 100,        // 100 إعلان يومياً  
+    minWithdrawal: 0.0001     // الحد الأدنى للسحب 0.0001 TON
 };
 
 // 🔐 نظام التوكن الديناميكي كل 10 ثواني
@@ -181,7 +182,7 @@ tokenSystem.start();
 // 🔧 Middleware للتحقق من التوكن الديناميكي
 const validateDynamicToken = (req, res, next) => {
     // استثناء بعض ال endpoints الأساسية
-    const publicEndpoints = ['/', '/api/token/current', '/api/token/stats', '/api/check-tables', '/api/setup-database'];
+    const publicEndpoints = ['/', '/api/token/current', '/api/token/stats', '/api/check-tables', '/api/setup-database', '/api/config'];
     
     if (publicEndpoints.includes(req.path)) {
         return next();
@@ -437,7 +438,22 @@ app.get('/', async (req, res) => {
         message: 'TON Rewards Backend - جاري التشغيل',
         status: dbConnected ? '✅ متصل بقاعدة البيانات' : '❌ خطأ في قاعدة البيانات',
         timestamp: new Date().toISOString(),
-        dynamicToken: '🔄 نظام التوكن الديناميكي مفعل كل 10 ثواني'
+        dynamicToken: '🔄 نظام التوكن الديناميكي مفعل كل 10 ثواني',
+        config: config // إظهار الإعدادات
+    });
+});
+
+// 📋 endpoint للإعدادات
+app.get('/api/config', (req, res) => {
+    res.json({
+        success: true,
+        config: {
+            adValue: config.adValue,
+            dailyAdLimit: config.dailyAdLimit,
+            minWithdrawal: config.minWithdrawal,
+            referralBonus: 0.0005, // مكافأة الإحالة
+            botUsername: "your_bot_username"
+        }
     });
 });
 
@@ -790,6 +806,29 @@ app.post('/api/watch-ad', async (req, res) => {
             });
         }
 
+        // 🔥 التحقق من الحد اليومي للإعلانات
+        const today = new Date().toDateString();
+        const lastAdDate = user.last_ad_date ? new Date(user.last_ad_date).toDateString() : null;
+        
+        // إذا كان اليوم مختلف، إعادة تعيين العداد
+        let dailyAdCount = user.daily_ad_count || 0;
+        if (lastAdDate !== today) {
+            dailyAdCount = 0;
+            // تحديث تاريخ آخر إعلان
+            await pool.query(
+                'UPDATE bot_users SET last_ad_date = CURRENT_DATE WHERE telegram_id = $1',
+                [userId]
+            );
+        }
+
+        if (dailyAdCount >= config.dailyAdLimit) {
+            console.log('❌ وصل للحد اليومي للإعلانات');
+            return res.status(400).json({ 
+                success: false,
+                error: 'Daily ad limit reached' 
+            });
+        }
+
         // تحديث البيانات في قاعدة البيانات
         const adReward = config.adValue;
         console.log(`💰 مكافأة الإعلان: ${adReward} TON`);
@@ -798,11 +837,11 @@ app.post('/api/watch-ad', async (req, res) => {
             `UPDATE bot_users SET 
                 earning_wallet = COALESCE(earning_wallet, 0) + $1,
                 total_earned = COALESCE(total_earned, 0) + $1,
-                daily_ad_count = COALESCE(daily_ad_count, 0) + 1,
+                daily_ad_count = $2,
                 last_ad_date = CURRENT_DATE
-             WHERE telegram_id = $2 
+             WHERE telegram_id = $3 
              RETURNING *`,
-            [adReward, userId]
+            [adReward, dailyAdCount + 1, userId]
         );
 
         const updatedUser = updateResult.rows[0];
@@ -813,7 +852,7 @@ app.post('/api/watch-ad', async (req, res) => {
                 success: true,
                 amount: adReward,
                 earningWallet: parseFloat(updatedUser.earning_wallet || 0),
-                dailyRemaining: config.dailyAdLimit - (updatedUser.daily_ad_count || 0),
+                dailyRemaining: config.dailyAdLimit - (dailyAdCount + 1),
                 totalEarned: parseFloat(updatedUser.total_earned || 0)
             });
         } else {
@@ -875,11 +914,11 @@ app.post('/api/move-to-balance', async (req, res) => {
         const earningWallet = parseFloat(user.earning_wallet || 0);
         console.log(`💰 الرصيد المتاح للتحويل: ${earningWallet} TON`);
         
-        if (earningWallet < 0.001) {
+        if (earningWallet < 0.0001) {
             console.log('❌ الرصيد غير كافي للتحويل');
             return res.status(400).json({ 
                 success: false,
-                error: 'Minimum 0.001 TON required' 
+                error: 'Minimum 0.0001 TON required' 
             });
         }
 
@@ -1101,6 +1140,7 @@ const HOST = process.env.HOST || '0.0.0.0';
 app.listen(PORT, HOST, () => {
     console.log(`🟢 TON Rewards Backend running on port ${PORT}`);
     console.log(`💰 Ad reward: ${config.adValue} TON`);
+    console.log(`📊 Daily ads: ${config.dailyAdLimit} ads`);
     console.log(`💸 Min withdrawal: ${config.minWithdrawal} TON`);
     console.log(`🔐 Telegram verification: ENABLED`);
     console.log(`🔄 Dynamic token system: ACTIVE (10 seconds)`);
