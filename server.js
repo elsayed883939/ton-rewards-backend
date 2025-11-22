@@ -8,7 +8,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🎯 البوت توكن
+// 🎯 البوت توكن - ضع التوكن الحقيقي هنا
 const BOT_TOKEN = "8257278435:AAHbzrJxIHytXdD1sNftjC8DnDz18kdvbOU";
 
 // الاتصال بقاعدة البيانات
