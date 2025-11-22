@@ -24,196 +24,43 @@ const config = {
     minWithdrawal: 0.0001     // الحد الأدنى للسحب 0.0001 TON
 };
 
-// 🔐 نظام التوكن الديناميكي كل 10 ثواني
-class DynamicTokenSystem {
-    constructor() {
-        this.tokens = new Map();
-        this.currentToken = null;
-        this.tokenHistory = [];
-        this.tokenCounter = 0;
-        this.intervalId = null;
-        
-        // إعدادات التوكن
-        this.config = {
-            tokenRefreshInterval: 10000, // 10 ثواني
-            tokenValidityWindow: 15000, // 15 ثانية صلاحية
-            maxTokens: 10,
-            secretKey: process.env.TOKEN_SECRET || 'ton-rewards-dynamic-token-secret-2024'
-        };
-    }
-
-    // توليد توكن جديد
-    generateToken() {
-        const timestamp = Date.now();
-        this.tokenCounter++;
-        
-        const tokenData = {
-            timestamp,
-            counter: this.tokenCounter,
-            random: crypto.randomBytes(32).toString('hex')
-        };
-
-        const tokenString = JSON.stringify(tokenData);
-        const token = crypto
-            .createHmac('sha512', this.config.secretKey)
-            .update(tokenString)
-            .digest('hex')
-            .substring(0, 50);
-
-        const tokenObject = {
-            token,
-            timestamp,
-            expiresAt: timestamp + this.config.tokenValidityWindow,
-            counter: this.tokenCounter
-        };
-
-        return tokenObject;
-    }
-
-    // بدء نظام التوكن
-    start() {
-        console.log('🚀 بدء نظام التوكن الديناميكي كل 10 ثواني...');
-        
-        // توليد أول توكن
-        this.updateToken();
-        
-        // جدولة تحديث التوكن
-        this.intervalId = setInterval(() => {
-            this.updateToken();
-        }, this.config.tokenRefreshInterval);
-
-        console.log(`🔄 التوكن بيتغير كل ${this.config.tokenRefreshInterval/1000} ثانية`);
-    }
-
-    // تحديث التوكن
-    updateToken() {
-        const newToken = this.generateToken();
-        
-        // إضافة التوكن الجديد
-        this.tokens.set(newToken.token, newToken);
-        this.currentToken = newToken.token;
-        
-        // حفظ التاريخ
-        this.tokenHistory.unshift({
-            token: newToken.token.substring(0, 15) + '...',
-            timestamp: new Date(newToken.timestamp).toLocaleTimeString(),
-            counter: newToken.counter
-        });
-        
-        if (this.tokenHistory.length > this.config.maxTokens) {
-            this.tokenHistory.pop();
-        }
-
-        // تنظيف التوكنات المنتهية
-        this.cleanExpiredTokens();
-        
-        console.log(`🔄 تحديث التوكن #${newToken.counter}: ${newToken.token.substring(0, 20)}... (${new Date().toLocaleTimeString()})`);
-    }
-
-    // تنظيف التوكنات المنتهية
-    cleanExpiredTokens() {
-        const now = Date.now();
-        let deletedCount = 0;
-        
-        for (let [token, data] of this.tokens.entries()) {
-            if (data.expiresAt < now) {
-                this.tokens.delete(token);
-                deletedCount++;
-            }
-        }
-        
-        if (deletedCount > 0) {
-            console.log(`🧹 تم تنظيف ${deletedCount} توكن منتهي`);
-        }
-    }
-
-    // التحقق من صحة التوكن
-    validateToken(token) {
-        if (!token || token.length < 10) {
-            console.log('❌ توكن غير صالح - فارغ أو قصير جداً');
-            return false;
-        }
-
-        const tokenData = this.tokens.get(token);
-        if (!tokenData) {
-            console.log(`❌ توكن غير معترف به: ${token.substring(0, 10)}...`);
-            return false;
-        }
-        
-        const now = Date.now();
-        if (tokenData.expiresAt < now) {
-            this.tokens.delete(token);
-            console.log(`⏰ توكن منتهي: ${token.substring(0, 10)}...`);
-            return false;
-        }
-        
-        console.log(`✅ توكن صالح: ${token.substring(0, 10)}...`);
-        return true;
-    }
-
-    // الحصول على التوكن الحالي
-    getCurrentToken() {
-        return this.currentToken;
-    }
-
-    // الحصول على إحصائيات
-    getStats() {
-        return {
-            currentToken: this.currentToken ? this.currentToken.substring(0, 15) + '...' : null,
-            activeTokens: this.tokens.size,
-            totalGenerated: this.tokenCounter,
-            tokenHistory: this.tokenHistory
-        };
-    }
-
-    // إيقاف النظام
-    stop() {
-        if (this.intervalId) {
-            clearInterval(this.intervalId);
-            console.log('🛑 تم إيقاف نظام التوكن');
-        }
-    }
-}
-
-// تهيئة نظام التوكن
-const tokenSystem = new DynamicTokenSystem();
-tokenSystem.start();
-
-// 🔧 Middleware للتحقق من التوكن الديناميكي
-const validateDynamicToken = (req, res, next) => {
-    // استثناء بعض ال endpoints الأساسية
-    const publicEndpoints = ['/', '/api/token/current', '/api/token/stats', '/api/check-tables', '/api/setup-database', '/api/config'];
+// 🔐 middleware للتحقق من توقيع تليجرام فقط
+const validateTelegramWebApp = (req, res, next) => {
+    // استثناء ال endpoints العامة
+    const publicEndpoints = ['/', '/api/config', '/api/check-tables', '/api/setup-database', '/api/test-withdrawal', '/api/fix-database'];
     
     if (publicEndpoints.includes(req.path)) {
         return next();
     }
 
-    const token = req.headers['x-dynamic-token'] || 
-                  req.headers['authorization']?.replace('Bearer ', '') || 
-                  req.query.dynamicToken;
+    const initData = req.headers['x-telegram-init-data'] || 
+                     req.body?.initData || 
+                     req.query?.initData;
 
-    if (!token) {
-        console.log('❌ طلب بدون توكن ديناميكي');
+    if (!initData) {
+        console.log('❌ طلب بدون توقيع تليجرام');
         return res.status(401).json({ 
             success: false,
-            error: 'التوكن الديناميكي مطلوب',
-            code: 'DYNAMIC_TOKEN_REQUIRED'
+            error: 'توقيع تليجرام مطلوب',
+            code: 'TELEGRAM_SIGNATURE_REQUIRED'
         });
     }
 
-    if (!tokenSystem.validateToken(token)) {
+    if (!validateTelegramInitData(initData)) {
+        console.log('❌ توقيع تليجرام غير صالح');
         return res.status(401).json({ 
             success: false,
-            error: 'توكن ديناميكي غير صالح أو منتهي',
-            code: 'INVALID_DYNAMIC_TOKEN'
+            error: 'توقيع تليجرام غير صالح',
+            code: 'INVALID_TELEGRAM_SIGNATURE'
         });
     }
 
+    console.log('✅ توقيع تليجرام صالح - متابعة الطلب');
     next();
 };
 
-// تطبيق middleware التوكن الديناميكي على جميع ال routes
-app.use(validateDynamicToken);
+// تطبيق ال middleware الجديد
+app.use(validateTelegramWebApp);
 
 // 🔧 دالة للتحقق من اتصال قاعدة البيانات
 async function checkDatabaseConnection() {
@@ -438,8 +285,8 @@ app.get('/', async (req, res) => {
         message: 'TON Rewards Backend - جاري التشغيل',
         status: dbConnected ? '✅ متصل بقاعدة البيانات' : '❌ خطأ في قاعدة البيانات',
         timestamp: new Date().toISOString(),
-        dynamicToken: '🔄 نظام التوكن الديناميكي مفعل كل 10 ثواني',
-        config: config // إظهار الإعدادات
+        security: '🔐 نظام التحقق بتوقيع تليجرام فقط',
+        config: config
     });
 });
 
@@ -454,26 +301,6 @@ app.get('/api/config', (req, res) => {
             referralBonus: 0.0005, // مكافأة الإحالة
             botUsername: "your_bot_username"
         }
-    });
-});
-
-// 🔐 endpoints خاصة بنظام التوكن
-app.get('/api/token/current', (req, res) => {
-    const currentToken = tokenSystem.getCurrentToken();
-    res.json({
-        success: true,
-        token: currentToken,
-        valid_for: '15 ثانية',
-        refresh_in: '10 ثواني',
-        message: 'استخدم هذا التوكن في رأس الطلب (X-Dynamic-Token: TOKEN)'
-    });
-});
-
-app.get('/api/token/stats', (req, res) => {
-    res.json({
-        success: true,
-        ...tokenSystem.getStats(),
-        system: 'نظام التوكن الديناميكي كل 10 ثواني'
     });
 });
 
@@ -1121,19 +948,6 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
     }
 });
 
-// 🛑 إيقاف نظيف للسيرفر
-process.on('SIGINT', () => {
-    console.log('\n🛑 إيقاف نظام التوكن...');
-    tokenSystem.stop();
-    process.exit(0);
-});
-
-process.on('SIGTERM', () => {
-    console.log('\n🛑 إيقاف نظام التوكن...');
-    tokenSystem.stop();
-    process.exit(0);
-});
-
 // 🚀 تشغيل السيرفر
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -1143,7 +957,7 @@ app.listen(PORT, HOST, () => {
     console.log(`📊 Daily ads: ${config.dailyAdLimit} ads`);
     console.log(`💸 Min withdrawal: ${config.minWithdrawal} TON`);
     console.log(`🔐 Telegram verification: ENABLED`);
-    console.log(`🔄 Dynamic token system: ACTIVE (10 seconds)`);
+    console.log(`🔄 Dynamic token system: DISABLED`);
     
     // فحص الاتصال بقاعدة البيانات عند البدء
     checkDatabaseConnection();
