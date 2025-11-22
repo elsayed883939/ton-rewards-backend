@@ -182,10 +182,15 @@ class DynamicTokenSystem {
 const tokenSystem = new DynamicTokenSystem();
 tokenSystem.start();
 
-// 🔧 Middleware للتحقق من التوكن الديناميكي
+// 🔧 Middleware للتحقق من التوكن الديناميكي - الإصدار المحسن
 const validateDynamicToken = (req, res, next) => {
     // استثناء بعض ال endpoints الأساسية
-    const publicEndpoints = ['/', '/api/token/current', '/api/token/stats', '/api/check-tables', '/api/setup-database', '/api/config', '/api/fix-all-tables', '/api/fix-withdrawals-table', '/api/debug-tables'];
+    const publicEndpoints = [
+        '/', '/api/token/current', '/api/token/stats', 
+        '/api/check-tables', '/api/setup-database', '/api/config',
+        '/api/fix-all-tables', '/api/fix-withdrawals-table', 
+        '/api/debug-tables', '/api/repair-database', '/api/debug-user'
+    ];
     
     if (publicEndpoints.includes(req.path)) {
         return next();
@@ -196,7 +201,7 @@ const validateDynamicToken = (req, res, next) => {
                   req.query.dynamicToken;
 
     if (!token) {
-        console.log('❌ طلب بدون توكن ديناميكي');
+        console.log('❌ طلب بدون توكن ديناميكي:', req.path);
         return res.status(401).json({ 
             success: false,
             error: 'التوكن الديناميكي مطلوب',
@@ -204,11 +209,23 @@ const validateDynamicToken = (req, res, next) => {
         });
     }
 
+    // 🔥 إضافة محاولة تجديد التوكن تلقائياً
     if (!tokenSystem.validateToken(token)) {
+        console.log('🔄 محاولة تجديد التوكن تلقائياً...');
+        tokenSystem.updateToken();
+        
+        // إعادة التحقق بعد التجديد
+        const newToken = tokenSystem.getCurrentToken();
+        if (newToken && tokenSystem.validateToken(newToken)) {
+            console.log('✅ تم تجديد التوكن بنجاح');
+            return next();
+        }
+        
         return res.status(401).json({ 
             success: false,
             error: 'توكن ديناميكي غير صالح أو منتهي',
-            code: 'INVALID_DYNAMIC_TOKEN'
+            code: 'INVALID_DYNAMIC_TOKEN',
+            hint: 'جرب تحديث الصفحة'
         });
     }
 
@@ -562,6 +579,60 @@ app.get('/api/fix-withdrawals-table', async (req, res) => {
     }
 });
 
+// 🔧 إصلاح شامل للقاعدة
+app.get('/api/repair-database', async (req, res) => {
+    try {
+        console.log('🔧 بدء إصلاح شامل للقاعدة...');
+        
+        // 1. إصلاح جدول المستخدمين
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS bot_users (
+                id SERIAL PRIMARY KEY,
+                telegram_id BIGINT UNIQUE NOT NULL,
+                username VARCHAR(255),
+                first_name VARCHAR(255) NOT NULL DEFAULT 'مستخدم',
+                balance DECIMAL(15, 8) DEFAULT 0.00000000,
+                earning_wallet DECIMAL(15, 8) DEFAULT 0.00000000,
+                total_earned DECIMAL(15, 8) DEFAULT 0.00000000,
+                daily_ad_count INTEGER DEFAULT 0,
+                last_ad_date DATE DEFAULT CURRENT_DATE,
+                referrals INTEGER DEFAULT 0,
+                referred_by BIGINT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ تم إصلاح جدول bot_users');
+
+        // 2. إصلاح جدول السحوبات
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS withdrawals (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                amount DECIMAL(15, 8) NOT NULL,
+                wallet_address TEXT NOT NULL,
+                status VARCHAR(50) DEFAULT 'pending',
+                method VARCHAR(100) DEFAULT 'TON Wallet',
+                memo TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ تم إصلاح جدول withdrawals');
+
+        res.json({
+            success: true,
+            message: 'تم إصلاح القاعدة بنجاح',
+            tables: ['bot_users', 'withdrawals']
+        });
+
+    } catch (error) {
+        console.error('❌ خطأ في إصلاح القاعدة:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
 // 🔧 إضافة endpoint لإنشاء جميع الجداول المطلوبة
 app.get('/api/fix-all-tables', async (req, res) => {
     try {
@@ -756,6 +827,42 @@ app.get('/api/setup-database', async (req, res) => {
             success: true,
             message: 'تم إنشاء/تحديث الجداول بنجاح'
         });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// 🔍 endpoint لفحص حالة المستخدم
+app.get('/api/debug-user/:userId', async (req, res) => {
+    try {
+        const userId = req.params.userId;
+        
+        // جلب بيانات المستخدم
+        const userResult = await pool.query(
+            'SELECT * FROM bot_users WHERE telegram_id = $1',
+            [userId]
+        );
+        
+        // جلب تاريخ السحوبات
+        const withdrawalsResult = await pool.query(
+            'SELECT * FROM withdrawals WHERE user_id = $1 ORDER BY created_at DESC',
+            [userId]
+        );
+        
+        res.json({
+            success: true,
+            user: userResult.rows[0] || null,
+            withdrawals: withdrawalsResult.rows,
+            tablesExist: {
+                bot_users: userResult.rows.length > 0,
+                withdrawals: withdrawalsResult.rows.length > 0
+            },
+            currentToken: tokenSystem.getCurrentToken()?.substring(0, 15) + '...'
+        });
+        
     } catch (error) {
         res.status(500).json({
             success: false,
