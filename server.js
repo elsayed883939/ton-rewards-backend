@@ -1,3 +1,6 @@
+ده كود السيرفر 
+
+
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
@@ -185,7 +188,7 @@ tokenSystem.start();
 // 🔧 Middleware للتحقق من التوكن الديناميكي
 const validateDynamicToken = (req, res, next) => {
     // استثناء بعض ال endpoints الأساسية
-    const publicEndpoints = ['/', '/api/token/current', '/api/token/stats', '/api/check-tables', '/api/setup-database', '/api/config'];
+    const publicEndpoints = ['/', '/api/token/current', '/api/token/stats', '/api/check-tables', '/api/setup-database', '/api/config', '/api/fix-all-tables', '/api/fix-withdrawals-table', '/api/debug-tables'];
     
     if (publicEndpoints.includes(req.path)) {
         return next();
@@ -511,6 +514,138 @@ app.get('/api/check-tables', async (req, res) => {
     }
 });
 
+// 🔧 إصلاح مشكلة السحب نهائياً
+app.get('/api/fix-withdrawals-table', async (req, res) => {
+    try {
+        console.log('🔧 بدء إصلاح جدول السحوبات...');
+        
+        // 1. إسقاط الجدول إذا كان موجوداً (لإعادة إنشائه)
+        try {
+            await pool.query('DROP TABLE IF EXISTS withdrawals CASCADE');
+            console.log('✅ تم حذف جدول السحوبات القديم');
+        } catch (error) {
+            console.log('ℹ️  الجدول غير موجود أو لا يمكن حذفه');
+        }
+
+        // 2. إنشاء الجدول من جديد مع جميع الأعمدة
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS withdrawals (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                amount DECIMAL(15, 8) NOT NULL,
+                wallet_address TEXT NOT NULL,
+                status VARCHAR(50) DEFAULT 'pending',
+                method VARCHAR(100) DEFAULT 'TON Wallet',
+                memo TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ تم إنشاء جدول السحوبات الجديد');
+
+        // 3. إضافة فهرس للأداء
+        await pool.query(`
+            CREATE INDEX IF NOT EXISTS idx_withdrawals_user_id ON withdrawals(user_id);
+            CREATE INDEX IF NOT EXISTS idx_withdrawals_status ON withdrawals(status);
+        `);
+        console.log('✅ تم إضافة الفهارس');
+
+        res.json({
+            success: true,
+            message: 'تم إصلاح جدول السحوبات بنجاح',
+            table: 'withdrawals',
+            columns: ['id', 'user_id', 'amount', 'wallet_address', 'status', 'method', 'memo', 'created_at']
+        });
+
+    } catch (error) {
+        console.error('❌ خطأ في إصلاح جدول السحوبات:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// 🔧 إضافة endpoint لإنشاء جميع الجداول المطلوبة
+app.get('/api/fix-all-tables', async (req, res) => {
+    try {
+        console.log('🔧 بدء إصلاح جميع الجداول...');
+        
+        // 1. إنشاء جدول bot_users إذا لم يكن موجوداً
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS bot_users (
+                id SERIAL PRIMARY KEY,
+                telegram_id BIGINT UNIQUE NOT NULL,
+                username VARCHAR(255),
+                first_name VARCHAR(255) NOT NULL DEFAULT 'مستخدم',
+                balance DECIMAL(15, 8) DEFAULT 0.00000000,
+                earning_wallet DECIMAL(15, 8) DEFAULT 0.00000000,
+                total_earned DECIMAL(15, 8) DEFAULT 0.00000000,
+                daily_ad_count INTEGER DEFAULT 0,
+                last_ad_date DATE DEFAULT CURRENT_DATE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ تم إنشاء/التحقق من جدول bot_users');
+
+        // 2. إنشاء جدول withdrawals مع العمود memo
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS withdrawals (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                amount DECIMAL(15, 8) NOT NULL,
+                wallet_address TEXT NOT NULL,
+                status VARCHAR(50) DEFAULT 'pending',
+                method VARCHAR(100) DEFAULT 'TON Wallet',
+                memo TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ تم إنشاء/التحقق من جدول withdrawals');
+
+        // 3. إنشاء جدول contest_leaderboard
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS contest_leaderboard (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT UNIQUE NOT NULL,
+                username VARCHAR(255),
+                first_name VARCHAR(255),
+                points INTEGER DEFAULT 0,
+                ads_watched INTEGER DEFAULT 0,
+                referrals_count INTEGER DEFAULT 0,
+                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ تم إنشاء/التحقق من جدول contest_leaderboard');
+
+        // 4. إنشاء جدول referrals
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS referrals (
+                id SERIAL PRIMARY KEY,
+                referrer_id BIGINT NOT NULL,
+                referred_id BIGINT UNIQUE NOT NULL,
+                referrer_earnings DECIMAL(15, 8) DEFAULT 0,
+                status VARCHAR(50) DEFAULT 'active',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ تم إنشاء/التحقق من جدول referrals');
+
+        res.json({
+            success: true,
+            message: 'تم إنشاء جميع الجداول بنجاح',
+            tables: ['bot_users', 'withdrawals', 'contest_leaderboard', 'referrals']
+        });
+
+    } catch (error) {
+        console.error('❌ خطأ في إنشاء الجداول:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
 // 🧪 اختبار السحب
 app.get('/api/test-withdrawal', async (req, res) => {
     try {
@@ -801,8 +936,11 @@ app.post('/api/register', async (req, res) => {
         });
     }
 });
-// 📺 مشاهدة إعلان وحفظ في قاعدة البيانات
+
+// 📺 مشاهدة إعلان - الإصدار النهائي (بدون مشاكل المسابقة)
 app.post('/api/watch-ad', async (req, res) => {
+    const client = await pool.connect();
+    
     try {
         const { initData } = req.body;
 
@@ -830,15 +968,24 @@ app.post('/api/watch-ad', async (req, res) => {
         const userId = telegramUser.id.toString();
         console.log(`👤 معالجة مشاهدة إعلان للمستخدم: ${userId}`);
         
-        // جلب المستخدم من قاعدة البيانات
-        const user = await getUserFromDB(userId);
-        if (!user) {
+        await client.query('BEGIN');
+
+        // جلب المستخدم مع قفل الصف لمنع التنافس
+        const userResult = await client.query(
+            'SELECT * FROM bot_users WHERE telegram_id = $1 FOR UPDATE',
+            [userId]
+        );
+        
+        if (userResult.rows.length === 0) {
+            await client.query('ROLLBACK');
             console.log('❌ المستخدم غير موجود - يجب التسجيل أولاً');
             return res.status(404).json({ 
                 success: false,
                 error: 'User not found - Please register first' 
             });
         }
+
+        const user = userResult.rows[0];
 
         // 🔥 التحقق من الحد اليومي للإعلانات
         const today = new Date().toDateString();
@@ -848,14 +995,10 @@ app.post('/api/watch-ad', async (req, res) => {
         let dailyAdCount = user.daily_ad_count || 0;
         if (lastAdDate !== today) {
             dailyAdCount = 0;
-            // تحديث تاريخ آخر إعلان
-            await pool.query(
-                'UPDATE bot_users SET last_ad_date = CURRENT_DATE WHERE telegram_id = $1',
-                [userId]
-            );
         }
 
         if (dailyAdCount >= config.dailyAdLimit) {
+            await client.query('ROLLBACK');
             console.log('❌ وصل للحد اليومي للإعلانات');
             return res.status(400).json({ 
                 success: false,
@@ -867,7 +1010,7 @@ app.post('/api/watch-ad', async (req, res) => {
         const adReward = config.adValue;
         console.log(`💰 مكافأة الإعلان: ${adReward} TON`);
         
-        const updateResult = await pool.query(
+        const updateResult = await client.query(
             `UPDATE bot_users SET 
                 earning_wallet = COALESCE(earning_wallet, 0) + $1,
                 total_earned = COALESCE(total_earned, 0) + $1,
@@ -881,18 +1024,26 @@ app.post('/api/watch-ad', async (req, res) => {
         const updatedUser = updateResult.rows[0];
         
         if (updatedUser) {
-            // 🔥 تحديث نقاط المسابقة
-            await pool.query(`
-                INSERT INTO contest_leaderboard (user_id, username, first_name, points, ads_watched, last_activity)
-                VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
-                ON CONFLICT (user_id) 
-                DO UPDATE SET 
-                    points = contest_leaderboard.points + EXCLUDED.points,
-                    ads_watched = contest_leaderboard.ads_watched + EXCLUDED.ads_watched,
-                    last_activity = EXCLUDED.last_activity
-            `, [userId, user.username, user.first_name, config.contestAdPoints, 1]);
+            // 🔥 تحديث نقاط المسابقة - محمي ضد الأخطاء
+            try {
+                await client.query(`
+                    INSERT INTO contest_leaderboard (user_id, username, first_name, points, ads_watched, last_activity)
+                    VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+                    ON CONFLICT (user_id) 
+                    DO UPDATE SET 
+                        points = contest_leaderboard.points + EXCLUDED.points,
+                        ads_watched = contest_leaderboard.ads_watched + EXCLUDED.ads_watched,
+                        last_activity = EXCLUDED.last_activity
+                `, [userId, user.username || '', user.first_name || 'User', config.contestAdPoints, 1]);
+                
+                console.log('✅ تمت مشاهدة الإعلان بنجاح + تحديث المسابقة');
+            } catch (contestError) {
+                console.log('⚠️  خطأ في تحديث المسابقة:', contestError.message);
+                // نستمر حتى لو فشل تحديث المسابقة
+            }
+
+            await client.query('COMMIT');
             
-            console.log('✅ تمت مشاهدة الإعلان بنجاح + تحديث المسابقة');
             res.json({
                 success: true,
                 amount: adReward,
@@ -902,6 +1053,7 @@ app.post('/api/watch-ad', async (req, res) => {
                 contestPoints: config.contestAdPoints
             });
         } else {
+            await client.query('ROLLBACK');
             console.log('❌ فشل في معالجة الإعلان');
             res.status(500).json({ 
                 success: false,
@@ -910,11 +1062,14 @@ app.post('/api/watch-ad', async (req, res) => {
         }
 
     } catch (error) {
+        await client.query('ROLLBACK');
         console.error('❌ خطأ في مشاهدة الإعلان:', error.message);
         res.status(500).json({ 
             success: false,
-            error: 'Failed to process ad' 
+            error: 'Failed to process ad: ' + error.message 
         });
+    } finally {
+        client.release();
     }
 });
 
@@ -1004,8 +1159,10 @@ app.post('/api/move-to-balance', async (req, res) => {
     }
 });
 
-// 💳 طلب سحب
+// 💳 طلب سحب - الإصدار النهائي المصحح
 app.post('/api/withdraw', async (req, res) => {
+    const client = await pool.connect();
+    
     try {
         const { initData, amount, walletAddress, method = 'TON Wallet', memo = '' } = req.body;
 
@@ -1033,9 +1190,16 @@ app.post('/api/withdraw', async (req, res) => {
         const userId = telegramUser.id.toString();
         console.log(`👤 معالجة سحب للمستخدم: ${userId}`);
         
-        // جلب المستخدم من قاعدة البيانات
-        const user = await getUserFromDB(userId);
-        if (!user) {
+        await client.query('BEGIN');
+
+        // جلب المستخدم مع قفل الصف لمنع التنافس
+        const userResult = await client.query(
+            'SELECT * FROM bot_users WHERE telegram_id = $1 FOR UPDATE',
+            [userId]
+        );
+        
+        if (userResult.rows.length === 0) {
+            await client.query('ROLLBACK');
             console.log('❌ المستخدم غير موجود');
             return res.status(404).json({ 
                 success: false,
@@ -1043,6 +1207,7 @@ app.post('/api/withdraw', async (req, res) => {
             });
         }
 
+        const user = userResult.rows[0];
         const userBalance = parseFloat(user.balance || 0);
         const withdrawAmount = parseFloat(amount);
         
@@ -1051,6 +1216,7 @@ app.post('/api/withdraw', async (req, res) => {
 
         // التحقق من الرصيد
         if (userBalance < withdrawAmount) {
+            await client.query('ROLLBACK');
             console.log('❌ رصيد غير كافي');
             return res.status(400).json({ 
                 success: false,
@@ -1060,6 +1226,7 @@ app.post('/api/withdraw', async (req, res) => {
 
         // التحقق من الحد الأدنى للسحب
         if (withdrawAmount < config.minWithdrawal) {
+            await client.query('ROLLBACK');
             console.log(`❌ الحد الأدنى للسحب ${config.minWithdrawal} TON`);
             return res.status(400).json({ 
                 success: false,
@@ -1067,53 +1234,43 @@ app.post('/api/withdraw', async (req, res) => {
             });
         }
 
-        // بدء معاملة السحب
-        const client = await pool.connect();
+        // خصم المبلغ من رصيد المستخدم
+        await client.query(
+            'UPDATE bot_users SET balance = balance - $1 WHERE telegram_id = $2',
+            [withdrawAmount, userId]
+        );
+
+        // تسجيل طلب السحب
+        const withdrawalResult = await client.query(
+            `INSERT INTO withdrawals 
+             (user_id, amount, wallet_address, status, method, memo) 
+             VALUES ($1, $2, $3, $4, $5, $6) 
+             RETURNING *`,
+            [userId, withdrawAmount, walletAddress, 'pending', method, memo]
+        );
+
+        await client.query('COMMIT');
+
+        const withdrawal = withdrawalResult.rows[0];
         
-        try {
-            await client.query('BEGIN');
-
-            // خصم المبلغ من رصيد المستخدم
-            await client.query(
-                'UPDATE bot_users SET balance = balance - $1 WHERE telegram_id = $2',
-                [withdrawAmount, userId]
-            );
-
-            // تسجيل طلب السحب
-            const withdrawalResult = await client.query(
-                `INSERT INTO withdrawals 
-                 (user_id, amount, wallet_address, status, method, memo) 
-                 VALUES ($1, $2, $3, $4, $5, $6) 
-                 RETURNING *`,
-                [userId, withdrawAmount, walletAddress, 'pending', method, memo]
-            );
-
-            await client.query('COMMIT');
-
-            const withdrawal = withdrawalResult.rows[0];
-            
-            console.log('✅ تم إنشاء طلب السحب بنجاح:', withdrawal.id);
-            
-            res.json({
-                success: true,
-                withdrawalId: withdrawal.id,
-                newBalance: userBalance - withdrawAmount,
-                message: 'تم تقديم طلب السحب بنجاح وسيتم معالجته خلال 24 ساعة'
-            });
-
-        } catch (error) {
-            await client.query('ROLLBACK');
-            throw error;
-        } finally {
-            client.release();
-        }
+        console.log('✅ تم إنشاء طلب السحب بنجاح:', withdrawal.id);
+        
+        res.json({
+            success: true,
+            withdrawalId: withdrawal.id,
+            newBalance: userBalance - withdrawAmount,
+            message: 'تم تقديم طلب السحب بنجاح وسيتم معالجته خلال 24 ساعة'
+        });
 
     } catch (error) {
+        await client.query('ROLLBACK');
         console.error('❌ خطأ في السحب:', error.message);
         res.status(500).json({ 
             success: false,
             error: 'Withdrawal failed: ' + error.message 
         });
+    } finally {
+        client.release();
     }
 });
 
@@ -1190,15 +1347,33 @@ app.get('/api/contest/leaderboard', async (req, res) => {
     }
 });
 
-app.post('/api/contest/update-points', async (req, res) => {
+// 🏆 إصلاح نظام المسابقة نهائياً
+app.post('/api/contest/update-user', async (req, res) => {
     try {
-        const { userId, points = 1, adsWatched = 0, referralsCount = 0 } = req.body;
+        const { userId, points = 0, adsWatched = 0, referralsCount = 0 } = req.body;
+        
+        console.log(`🔄 تحديث مسابقة للمستخدم: ${userId}`, { points, adsWatched, referralsCount });
         
         // جلب بيانات المستخدم أولاً
         const user = await getUserFromDB(userId);
         if (!user) {
             return res.status(404).json({ success: false, error: 'User not found' });
         }
+        
+        // التأكد من وجود جدول المسابقة
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS contest_leaderboard (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT UNIQUE NOT NULL,
+                username VARCHAR(255),
+                first_name VARCHAR(255),
+                points INTEGER DEFAULT 0,
+                ads_watched INTEGER DEFAULT 0,
+                referrals_count INTEGER DEFAULT 0,
+                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
         
         // تحديث أو إدخال بيانات المسابقة
         const result = await pool.query(`
@@ -1212,7 +1387,9 @@ app.post('/api/contest/update-points', async (req, res) => {
                 referrals_count = contest_leaderboard.referrals_count + EXCLUDED.referrals_count,
                 last_activity = EXCLUDED.last_activity
             RETURNING *
-        `, [userId, user.username, user.first_name, points, adsWatched, referralsCount]);
+        `, [userId, user.username || '', user.first_name || 'User', points, adsWatched, referralsCount]);
+        
+        console.log('✅ تم تحديث المسابقة بنجاح:', result.rows[0]);
         
         res.json({
             success: true,
@@ -1221,6 +1398,32 @@ app.post('/api/contest/update-points', async (req, res) => {
         });
     } catch (error) {
         console.error('❌ خطأ في تحديث نقاط المسابقة:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 🏆 جلب ترتيب مستخدم معين
+app.get('/api/contest/user-rank/:userId', async (req, res) => {
+    try {
+        const userId = req.params.userId;
+        
+        const rankResult = await pool.query(`
+            SELECT position FROM (
+                SELECT user_id, points, ROW_NUMBER() OVER (ORDER BY points DESC, last_activity DESC) as position
+                FROM contest_leaderboard
+            ) ranked WHERE user_id = $1
+        `, [userId]);
+        
+        const userRank = rankResult.rows.length > 0 ? rankResult.rows[0].position : 0;
+        
+        res.json({
+            success: true,
+            userId: userId,
+            rank: userRank,
+            inLeaderboard: userRank > 0
+        });
+    } catch (error) {
+        console.error('❌ خطأ في جلب الترتيب:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -1323,6 +1526,45 @@ app.get('/api/referrals/user/:userId', async (req, res) => {
         });
     } catch (error) {
         console.error('❌ خطأ في جلب بيانات الإحالات:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 🔍 فحص مفصل للجداول
+app.get('/api/debug-tables', async (req, res) => {
+    try {
+        // فحص جدول bot_users
+        const botUsersColumns = await pool.query(`
+            SELECT column_name, data_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_name = 'bot_users'
+            ORDER BY ordinal_position
+        `);
+
+        // فحص جدول withdrawals
+        const withdrawalsColumns = await pool.query(`
+            SELECT column_name, data_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_name = 'withdrawals'
+            ORDER BY ordinal_position
+        `);
+
+        // فحص جدول contest_leaderboard
+        const contestColumns = await pool.query(`
+            SELECT column_name, data_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_name = 'contest_leaderboard'
+            ORDER BY ordinal_position
+        `);
+
+        res.json({
+            success: true,
+            bot_users_columns: botUsersColumns.rows,
+            withdrawals_columns: withdrawalsColumns.rows,
+            contest_leaderboard_columns: contestColumns.rows,
+            missing_memo: !withdrawalsColumns.rows.find(col => col.column_name === 'memo')
+        });
+    } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
