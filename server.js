@@ -1429,40 +1429,24 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
     }
 });
 
-// 🏆 endpoints المسابقة
-app.get('/api/contest/leaderboard', async (req, res) => {
-    try {
-        const leaderboard = await pool.query(`
-            SELECT cl.*, bu.first_name, bu.username 
-            FROM contest_leaderboard cl
-            LEFT JOIN bot_users bu ON cl.user_id = bu.telegram_id
-            ORDER BY cl.points DESC, cl.last_activity DESC
-            LIMIT 50
-        `);
-        
-        res.json({
-            success: true,
-            leaderboard: leaderboard.rows,
-            totalParticipants: leaderboard.rows.length
-        });
-    } catch (error) {
-        console.error('❌ خطأ في جلب المتصدرين:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// 🏆 إصلاح نظام المسابقة نهائياً
-app.post('/api/contest/update-user', async (req, res) => {
+// 🏆 نظام المسابقة المحسن - الإصدار المصحح
+app.post('/api/contest/update-points', async (req, res) => {
     try {
         const { userId, points = 0, adsWatched = 0, referralsCount = 0 } = req.body;
         
-        console.log(`🔄 تحديث مسابقة للمستخدم: ${userId}`, { points, adsWatched, referralsCount });
+        console.log(`🔄 تحديث نقاط المسابقة للمستخدم: ${userId}`, { points, adsWatched, referralsCount });
         
         // جلب بيانات المستخدم أولاً
-        const user = await getUserFromDB(userId);
-        if (!user) {
+        const userResult = await pool.query(
+            'SELECT * FROM bot_users WHERE telegram_id = $1',
+            [userId]
+        );
+        
+        if (userResult.rows.length === 0) {
             return res.status(404).json({ success: false, error: 'User not found' });
         }
+        
+        const user = userResult.rows[0];
         
         // التأكد من وجود جدول المسابقة
         await pool.query(`
@@ -1506,6 +1490,32 @@ app.post('/api/contest/update-user', async (req, res) => {
     }
 });
 
+// 🏆 جلب المتصدرين مرتبين حسب النقاط
+app.get('/api/contest/leaderboard', async (req, res) => {
+    try {
+        const leaderboard = await pool.query(`
+            SELECT 
+                cl.*,
+                bu.username,
+                bu.first_name,
+                ROW_NUMBER() OVER (ORDER BY cl.points DESC, cl.last_activity DESC) as rank
+            FROM contest_leaderboard cl
+            LEFT JOIN bot_users bu ON cl.user_id = bu.telegram_id
+            ORDER BY cl.points DESC, cl.last_activity DESC
+            LIMIT 50
+        `);
+        
+        res.json({
+            success: true,
+            leaderboard: leaderboard.rows,
+            totalParticipants: leaderboard.rows.length
+        });
+    } catch (error) {
+        console.error('❌ خطأ في جلب المتصدرين:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // 🏆 جلب ترتيب مستخدم معين
 app.get('/api/contest/user-rank/:userId', async (req, res) => {
     try {
@@ -1513,7 +1523,7 @@ app.get('/api/contest/user-rank/:userId', async (req, res) => {
         
         const rankResult = await pool.query(`
             SELECT position FROM (
-                SELECT user_id, points, ROW_NUMBER() OVER (ORDER BY points DESC, last_activity DESC) as position
+                SELECT user_id, ROW_NUMBER() OVER (ORDER BY points DESC, last_activity DESC) as position
                 FROM contest_leaderboard
             ) ranked WHERE user_id = $1
         `, [userId]);
