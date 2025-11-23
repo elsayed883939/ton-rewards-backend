@@ -9,8 +9,7 @@ app.use(cors());
 app.use(express.json());
 
 // 🎯 البوت توكن
-const BOT_TOKEN = "8257278435:AAHbzrJxIHytXdD1sNftjC8DnDz18kdvbOU";
-
+const BOT_TOKEN = process.env.BOT_TOKEN; // ✅ آمن
 // الاتصال بقاعدة البيانات
 const pool = new Pool({
     connectionString: "postgresql://postgres:EBEXkZAIxdoDqsUNjaYJNcjLdDvuHtSU@maglev.proxy.rlwy.net:12181/railway",
