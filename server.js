@@ -38,7 +38,7 @@ class DynamicTokenSystem {
         
         this.config = {
             tokenRefreshInterval: 10000,
-            tokenValidityWindow: 30000, // زدناها لـ 30 ثانية
+            tokenValidityWindow: 30000,
             maxTokens: 20,
             secretKey: process.env.TOKEN_SECRET || 'ton-rewards-dynamic-token-secret-2024'
         };
@@ -60,7 +60,7 @@ class DynamicTokenSystem {
             .createHmac('sha512', this.config.secretKey)
             .update(tokenString)
             .digest('hex')
-            .substring(0, 64); // زدنا الطول لـ 64 حرف
+            .substring(0, 64);
 
         const tokenObject = {
             token,
@@ -161,7 +161,8 @@ const validateDynamicToken = (req, res, next) => {
         '/', '/api/token/current', '/api/token/stats', 
         '/api/check-tables', '/api/setup-database', '/api/config',
         '/api/fix-all-tables', '/api/fix-withdrawals-table', 
-        '/api/debug-tables', '/api/repair-database', '/api/debug-user'
+        '/api/debug-tables', '/api/repair-database', '/api/debug-user',
+        '/api/test-withdraw' // إضافة endpoint التجربة
     ];
     
     if (publicEndpoints.includes(req.path)) {
@@ -181,7 +182,6 @@ const validateDynamicToken = (req, res, next) => {
         });
     }
 
-    // 🔥 إضافة مرونة أكثر في التحقق
     if (!tokenSystem.validateToken(token)) {
         console.log('🔄 محاولة تجديد التوكن تلقائياً...');
         tokenSystem.updateToken();
@@ -199,6 +199,25 @@ const validateDynamicToken = (req, res, next) => {
 
 // تطبيق middleware التوكن الديناميكي على جميع ال routes
 app.use(validateDynamicToken);
+
+// 🔧 دالة لإصلاح جدول withdrawals تلقائياً
+async function fixWithdrawalsTable() {
+    try {
+        console.log('🔧 التحقق من جدول withdrawals...');
+        
+        // إضافة عمود memo إذا كان غير موجود
+        await pool.query(`
+            ALTER TABLE withdrawals 
+            ADD COLUMN IF NOT EXISTS memo TEXT
+        `);
+        
+        console.log('✅ تم التأكد من وجود عمود memo في جدول withdrawals');
+        return true;
+    } catch (error) {
+        console.error('❌ خطأ في إصلاح جدول withdrawals:', error);
+        return false;
+    }
+}
 
 // 🔧 دالة للتحقق من اتصال قاعدة البيانات
 async function checkDatabaseConnection() {
@@ -363,12 +382,6 @@ async function createUserInDB(userData) {
             return await getUserFromDB(userData.telegram_id);
         }
         
-        if (error.code === '42703') {
-            console.log('⚠️  أعمدة ناقصة، جاري إصلاح الجداول...');
-            await fixMissingColumns();
-            return await createUserInDB(userData);
-        }
-        
         return null;
     }
 }
@@ -455,6 +468,43 @@ app.get('/api/token/stats', (req, res) => {
     });
 });
 
+// 🔧 إصلاح جدول withdrawals وإضافة عمود memo
+app.get('/api/fix-withdrawals-table', async (req, res) => {
+    try {
+        console.log('🔧 بدء إصلاح جدول السحوبات...');
+        
+        // 1. إضافة عمود memo إذا كان غير موجود
+        await pool.query(`
+            ALTER TABLE withdrawals 
+            ADD COLUMN IF NOT EXISTS memo TEXT
+        `);
+        console.log('✅ تم إضافة/التحقق من عمود memo');
+        
+        // 2. التحقق من جميع الأعمدة
+        const columns = await pool.query(`
+            SELECT column_name, data_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_name = 'withdrawals'
+            ORDER BY ordinal_position
+        `);
+        
+        console.log('📊 أعمدة جدول withdrawals:', columns.rows);
+        
+        res.json({
+            success: true,
+            message: 'تم إصلاح جدول السحوبات بنجاح',
+            columns: columns.rows
+        });
+
+    } catch (error) {
+        console.error('❌ خطأ في إصلاح جدول السحوبات:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
 // 🔍 فحص الجداول
 app.get('/api/check-tables', async (req, res) => {
     try {
@@ -508,7 +558,7 @@ app.get('/api/repair-database', async (req, res) => {
         `);
         console.log('✅ تم إصلاح جدول bot_users');
 
-        // 2. إصلاح جدول السحوبات
+        // 2. إصلاح جدول السحوبات مع عمود memo
         await pool.query(`
             CREATE TABLE IF NOT EXISTS withdrawals (
                 id SERIAL PRIMARY KEY,
@@ -1165,7 +1215,7 @@ app.post('/api/move-to-balance', async (req, res) => {
     }
 });
 
-// 💳 طلب سحب - الإصدار المحسن والمصلح
+// 💳 طلب سحب - الإصدار المصحح تماماً مع إصلاح العمود
 app.post('/api/withdraw', async (req, res) => {
     const client = await pool.connect();
     
@@ -1174,27 +1224,26 @@ app.post('/api/withdraw', async (req, res) => {
 
         console.log('📥 طلب سحب:', { amount, walletAddress, method, memo });
 
-        // 🔥 تحقق بسيط من البيانات الأساسية أولاً
+        // 🔥 أولاً: تأكد من وجود عمود memo
+        await fixWithdrawalsTable();
+
+        // تحقق من البيانات الأساسية
         if (!initData || !amount || !walletAddress) {
             return res.status(400).json({
                 success: false,
-                error: 'بيانات ناقصة: initData, amount, walletAddress مطلوبة'
+                error: 'بيانات ناقصة'
             });
         }
 
         if (!validateTelegramInitData(initData)) {
-            console.log('❌ فشل التحقق - رفض السحب');
             return res.status(401).json({ 
                 success: false,
                 error: 'Invalid security signature' 
             });
         }
 
-        console.log('✅ تم التحقق بنجاح - متابعة السحب');
         const telegramUser = parseTelegramUser(initData);
-        
         if (!telegramUser?.id) {
-            console.log('❌ بيانات المستخدم غير صالحة');
             return res.status(400).json({ 
                 success: false,
                 error: 'Invalid user data' 
@@ -1206,7 +1255,7 @@ app.post('/api/withdraw', async (req, res) => {
         
         await client.query('BEGIN');
 
-        // جلب المستخدم مع قفل الصف لمنع التنافس
+        // جلب المستخدم
         const userResult = await client.query(
             'SELECT * FROM bot_users WHERE telegram_id = $1 FOR UPDATE',
             [userId]
@@ -1214,7 +1263,6 @@ app.post('/api/withdraw', async (req, res) => {
         
         if (userResult.rows.length === 0) {
             await client.query('ROLLBACK');
-            console.log('❌ المستخدم غير موجود');
             return res.status(404).json({ 
                 success: false,
                 error: 'User not found' 
@@ -1225,47 +1273,42 @@ app.post('/api/withdraw', async (req, res) => {
         const userBalance = parseFloat(user.balance || 0);
         const withdrawAmount = parseFloat(amount);
         
-        console.log(`💰 رصيد المستخدم: ${userBalance} TON`);
-        console.log(`💸 مبلغ السحب: ${withdrawAmount} TON`);
-
         // التحقق من الرصيد
         if (userBalance < withdrawAmount) {
             await client.query('ROLLBACK');
-            console.log('❌ رصيد غير كافي');
             return res.status(400).json({ 
                 success: false,
                 error: 'Insufficient balance' 
             });
         }
 
-        // التحقق من الحد الأدنى للسحب بناءً على الطريقة
+        // التحقق من الحد الأدنى للسحب
         let minWithdrawal = config.minWithdrawal;
         if (method === 'TON Wallet') {
-            minWithdrawal = 0.05; // الحد الأدنى لـ TON
+            minWithdrawal = 0.05;
         }
 
         if (withdrawAmount < minWithdrawal) {
             await client.query('ROLLBACK');
-            console.log(`❌ الحد الأدنى للسحب ${minWithdrawal} TON`);
             return res.status(400).json({ 
                 success: false,
                 error: `Minimum withdrawal is ${minWithdrawal} TON` 
             });
         }
 
-        // خصم المبلغ من رصيد المستخدم
+        // خصم المبلغ
         await client.query(
             'UPDATE bot_users SET balance = balance - $1 WHERE telegram_id = $2',
             [withdrawAmount, userId]
         );
 
-        // تسجيل طلب السحب
+        // 🔥 إدراج السحب مع memo
         const withdrawalResult = await client.query(
             `INSERT INTO withdrawals 
              (user_id, amount, wallet_address, status, method, memo) 
              VALUES ($1, $2, $3, $4, $5, $6) 
              RETURNING *`,
-            [userId, withdrawAmount, walletAddress, 'pending', method, memo]
+            [userId, withdrawAmount, walletAddress, 'pending', method, memo || '']
         );
 
         await client.query('COMMIT');
@@ -1287,6 +1330,63 @@ app.post('/api/withdraw', async (req, res) => {
         res.status(500).json({ 
             success: false,
             error: 'Withdrawal failed: ' + error.message 
+        });
+    } finally {
+        client.release();
+    }
+});
+
+// 🧪 endpoint سحب للتجربة (بدون توكن) - مؤقت
+app.post('/api/test-withdraw', async (req, res) => {
+    const client = await pool.connect();
+    
+    try {
+        const { initData, amount, walletAddress, method = 'TON Wallet', memo = '' } = req.body;
+
+        console.log('🧪 TEST - طلب سحب تجريبي:', { 
+            amount, 
+            walletAddress, 
+            method, 
+            memo,
+            hasInitData: !!initData 
+        });
+
+        // 🔥 أولاً: تأكد من وجود عمود memo
+        await fixWithdrawalsTable();
+
+        // 🔥 تحقق بسيط جداً من البيانات
+        if (!amount || !walletAddress) {
+            return res.status(400).json({
+                success: false,
+                error: 'بيانات ناقصة: amount و walletAddress مطلوبين'
+            });
+        }
+
+        const withdrawAmount = parseFloat(amount);
+        
+        // تحقق من المبلغ
+        if (withdrawAmount < 0.0001) {
+            return res.status(400).json({
+                success: false,
+                error: 'الحد الأدنى للسحب هو 0.0001 TON'
+            });
+        }
+
+        // محاكاة عملية السحب الناجحة
+        console.log('✅ TEST - سحب ناجح (محاكاة)');
+        
+        res.json({
+            success: true,
+            withdrawalId: 'test_' + Date.now(),
+            newBalance: 0.0000,
+            message: 'تم تقديم طلب السحب بنجاح (وضع تجريبي)'
+        });
+
+    } catch (error) {
+        console.error('❌ TEST - خطأ في السحب:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: 'فشل في السحب: ' + error.message 
         });
     } finally {
         client.release();
@@ -1626,4 +1726,6 @@ app.listen(PORT, HOST, () => {
     
     // فحص الاتصال بقاعدة البيانات عند البدء
     checkDatabaseConnection();
+    // إصلاح جدول withdrawals تلقائياً
+    fixWithdrawalsTable();
 });
