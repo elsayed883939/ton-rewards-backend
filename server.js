@@ -17,17 +17,17 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
-// 🔥 الإعدادات الجديدة - 100 إعلان يومياً
+// 🔥 الإعدادات الجديدة - 100 إعلان يومياً + نقطة واحدة لكل إعلان
 const config = {
     adValue: 0.0001,          // 0.0001 TON لكل إعلان
     dailyAdLimit: 100,        // 100 إعلان يومياً  
     minWithdrawal: 0.0001,    // الحد الأدنى للسحب 0.0001 TON
     referralBonus: 0.0005,    // مكافأة الإحالة
-    contestAdPoints: 1,       // نقاط المسابقة لكل إعلان
+    contestAdPoints: 1,       // ⚡ تعديل: نقطة واحدة فقط لكل إعلان
     contestReferralPoints: 15 // نقاط المسابقة لكل إحالة
 };
 
-// 🔧 إصلاح نظام التوكن الديناميكي - الإصدار المحسن
+// 🔧 نظام التوكن الديناميكي - الإصدار المحسن
 class DynamicTokenSystem {
     constructor() {
         this.tokens = new Map();
@@ -161,8 +161,7 @@ const validateDynamicToken = (req, res, next) => {
         '/', '/api/token/current', '/api/token/stats', 
         '/api/check-tables', '/api/setup-database', '/api/config',
         '/api/fix-all-tables', '/api/fix-withdrawals-table', 
-        '/api/debug-tables', '/api/repair-database', '/api/debug-user',
-        '/api/test-withdraw' // إضافة endpoint التجربة
+        '/api/debug-tables', '/api/repair-database', '/api/debug-user'
     ];
     
     if (publicEndpoints.includes(req.path)) {
@@ -199,25 +198,6 @@ const validateDynamicToken = (req, res, next) => {
 
 // تطبيق middleware التوكن الديناميكي على جميع ال routes
 app.use(validateDynamicToken);
-
-// 🔧 دالة لإصلاح جدول withdrawals تلقائياً
-async function fixWithdrawalsTable() {
-    try {
-        console.log('🔧 التحقق من جدول withdrawals...');
-        
-        // إضافة عمود memo إذا كان غير موجود
-        await pool.query(`
-            ALTER TABLE withdrawals 
-            ADD COLUMN IF NOT EXISTS memo TEXT
-        `);
-        
-        console.log('✅ تم التأكد من وجود عمود memo في جدول withdrawals');
-        return true;
-    } catch (error) {
-        console.error('❌ خطأ في إصلاح جدول withdrawals:', error);
-        return false;
-    }
-}
 
 // 🔧 دالة للتحقق من اتصال قاعدة البيانات
 async function checkDatabaseConnection() {
@@ -382,6 +362,12 @@ async function createUserInDB(userData) {
             return await getUserFromDB(userData.telegram_id);
         }
         
+        if (error.code === '42703') {
+            console.log('⚠️  أعمدة ناقصة، جاري إصلاح الجداول...');
+            await fixMissingColumns();
+            return await createUserInDB(userData);
+        }
+        
         return null;
     }
 }
@@ -441,7 +427,7 @@ app.get('/api/config', (req, res) => {
             dailyAdLimit: config.dailyAdLimit,
             minWithdrawal: config.minWithdrawal,
             referralBonus: config.referralBonus,
-            contestAdPoints: config.contestAdPoints,
+            contestAdPoints: config.contestAdPoints, // ⚡ نقطة واحدة فقط
             contestReferralPoints: config.contestReferralPoints,
             botUsername: "Aborabie777_bot"
         }
@@ -467,44 +453,6 @@ app.get('/api/token/stats', (req, res) => {
         system: 'نظام التوكن الديناميكي كل 10 ثواني'
     });
 });
-
-// 🔧 إصلاح جدول withdrawals وإضافة عمود memo
-app.get('/api/fix-withdrawals-table', async (req, res) => {
-    try {
-        console.log('🔧 بدء إصلاح جدول السحوبات...');
-        
-        // 1. إضافة عمود memo إذا كان غير موجود
-        await pool.query(`
-            ALTER TABLE withdrawals 
-            ADD COLUMN IF NOT EXISTS memo TEXT
-        `);
-        console.log('✅ تم إضافة/التحقق من عمود memo');
-        
-        // 2. التحقق من جميع الأعمدة
-        const columns = await pool.query(`
-            SELECT column_name, data_type, is_nullable
-            FROM information_schema.columns
-            WHERE table_name = 'withdrawals'
-            ORDER BY ordinal_position
-        `);
-        
-        console.log('📊 أعمدة جدول withdrawals:', columns.rows);
-        
-        res.json({
-            success: true,
-            message: 'تم إصلاح جدول السحوبات بنجاح',
-            columns: columns.rows
-        });
-
-    } catch (error) {
-        console.error('❌ خطأ في إصلاح جدول السحوبات:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
 // 🔍 فحص الجداول
 app.get('/api/check-tables', async (req, res) => {
     try {
@@ -558,7 +506,7 @@ app.get('/api/repair-database', async (req, res) => {
         `);
         console.log('✅ تم إصلاح جدول bot_users');
 
-        // 2. إصلاح جدول السحوبات مع عمود memo
+        // 2. إصلاح جدول السحوبات
         await pool.query(`
             CREATE TABLE IF NOT EXISTS withdrawals (
                 id SERIAL PRIMARY KEY,
@@ -662,162 +610,6 @@ app.get('/api/fix-all-tables', async (req, res) => {
 
     } catch (error) {
         console.error('❌ خطأ في إنشاء الجداول:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// 🧪 اختبار السحب
-app.get('/api/test-withdrawal', async (req, res) => {
-    try {
-        const tableCheck = await pool.query(`
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name = 'withdrawals'
-            )
-        `);
-        
-        const withdrawalsTableExists = tableCheck.rows[0].exists;
-        
-        res.json({
-            success: true,
-            withdrawalsTableExists: withdrawalsTableExists,
-            message: withdrawalsTableExists 
-                ? '✅ جدول السحوبات موجود وجاهز' 
-                : '❌ جدول السحوبات غير موجود - استخدم /api/setup-database'
-        });
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// 🔧 endpoint لإصلاح الأعمدة الناقصة
-app.get('/api/fix-database', async (req, res) => {
-    try {
-        await fixMissingColumns();
-        
-        res.json({
-            success: true,
-            message: 'تم إصلاح الجداول بنجاح'
-        });
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// 🔄 إعادة إنشاء الجداول إذا محتاج
-app.get('/api/setup-database', async (req, res) => {
-    try {
-        // إنشاء جدول bot_users إذا مش موجود
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS bot_users (
-                id SERIAL PRIMARY KEY,
-                telegram_id BIGINT UNIQUE NOT NULL,
-                username VARCHAR(255),
-                first_name VARCHAR(255) NOT NULL,
-                balance DECIMAL(15, 8) DEFAULT 0.00000000,
-                earning_wallet DECIMAL(15, 8) DEFAULT 0.00000000,
-                total_earned DECIMAL(15, 8) DEFAULT 0.00000000,
-                daily_ad_count INTEGER DEFAULT 0,
-                last_ad_date DATE DEFAULT CURRENT_DATE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // إنشاء جدول withdrawals إذا مش موجود
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS withdrawals (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                amount DECIMAL(15, 8) NOT NULL,
-                wallet_address TEXT NOT NULL,
-                status VARCHAR(50) DEFAULT 'pending',
-                method VARCHAR(100) DEFAULT 'TON Wallet',
-                memo TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // 🆕 إنشاء جدول المسابقة
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS contest_leaderboard (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT UNIQUE NOT NULL,
-                username VARCHAR(255),
-                first_name VARCHAR(255),
-                points INTEGER DEFAULT 0,
-                ads_watched INTEGER DEFAULT 0,
-                referrals_count INTEGER DEFAULT 0,
-                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // 🆕 إنشاء جدول الإحالات
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS referrals (
-                id SERIAL PRIMARY KEY,
-                referrer_id BIGINT NOT NULL,
-                referred_id BIGINT UNIQUE NOT NULL,
-                referrer_earnings DECIMAL(15, 8) DEFAULT 0,
-                status VARCHAR(50) DEFAULT 'active',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // 🔥 تأكد من وجود جميع الأعمدة
-        await fixMissingColumns();
-
-        res.json({
-            success: true,
-            message: 'تم إنشاء/تحديث الجداول بنجاح'
-        });
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// 🔍 endpoint لفحص حالة المستخدم
-app.get('/api/debug-user/:userId', async (req, res) => {
-    try {
-        const userId = req.params.userId;
-        
-        // جلب بيانات المستخدم
-        const userResult = await pool.query(
-            'SELECT * FROM bot_users WHERE telegram_id = $1',
-            [userId]
-        );
-        
-        // جلب تاريخ السحوبات
-        const withdrawalsResult = await pool.query(
-            'SELECT * FROM withdrawals WHERE user_id = $1 ORDER BY created_at DESC',
-            [userId]
-        );
-        
-        res.json({
-            success: true,
-            user: userResult.rows[0] || null,
-            withdrawals: withdrawalsResult.rows,
-            tablesExist: {
-                bot_users: userResult.rows.length > 0,
-                withdrawals: withdrawalsResult.rows.length > 0
-            },
-            currentToken: tokenSystem.getCurrentToken()?.substring(0, 15) + '...'
-        });
-        
-    } catch (error) {
         res.status(500).json({
             success: false,
             error: error.message
@@ -995,7 +787,7 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-// 📺 مشاهدة إعلان - الإصدار النهائي
+// 📺 مشاهدة إعلان - الإصدار المعدل (نقطة واحدة فقط)
 app.post('/api/watch-ad', async (req, res) => {
     const client = await pool.connect();
     
@@ -1071,7 +863,7 @@ app.post('/api/watch-ad', async (req, res) => {
             `UPDATE bot_users SET 
                 earning_wallet = COALESCE(earning_wallet, 0) + $1,
                 total_earned = COALESCE(total_earned, 0) + $1,
-                daily_ad_count = $1,
+                daily_ad_count = $2,
                 last_ad_date = CURRENT_DATE
              WHERE telegram_id = $3 
              RETURNING *`,
@@ -1081,7 +873,7 @@ app.post('/api/watch-ad', async (req, res) => {
         const updatedUser = updateResult.rows[0];
         
         if (updatedUser) {
-            // 🔥 تحديث نقاط المسابقة - محمي ضد الأخطاء
+            // 🔥 تحديث نقاط المسابقة - نقطة واحدة فقط
             try {
                 await client.query(`
                     INSERT INTO contest_leaderboard (user_id, username, first_name, points, ads_watched, last_activity)
@@ -1093,7 +885,7 @@ app.post('/api/watch-ad', async (req, res) => {
                         last_activity = EXCLUDED.last_activity
                 `, [userId, user.username || '', user.first_name || 'User', config.contestAdPoints, 1]);
                 
-                console.log('✅ تمت مشاهدة الإعلان بنجاح + تحديث المسابقة');
+                console.log('✅ تمت مشاهدة الإعلان بنجاح + نقطة مسابقة واحدة');
             } catch (contestError) {
                 console.log('⚠️  خطأ في تحديث المسابقة:', contestError.message);
             }
@@ -1106,7 +898,7 @@ app.post('/api/watch-ad', async (req, res) => {
                 earningWallet: parseFloat(updatedUser.earning_wallet || 0),
                 dailyRemaining: config.dailyAdLimit - (dailyAdCount + 1),
                 totalEarned: parseFloat(updatedUser.total_earned || 0),
-                contestPoints: config.contestAdPoints
+                contestPoints: config.contestAdPoints // ⚡ نقطة واحدة فقط
             });
         } else {
             await client.query('ROLLBACK');
@@ -1214,8 +1006,7 @@ app.post('/api/move-to-balance', async (req, res) => {
         });
     }
 });
-
-// 💳 طلب سحب - الإصدار المصحح تماماً مع إصلاح العمود
+// 💳 طلب سحب - الإصدار المحسن والمصلح
 app.post('/api/withdraw', async (req, res) => {
     const client = await pool.connect();
     
@@ -1224,26 +1015,27 @@ app.post('/api/withdraw', async (req, res) => {
 
         console.log('📥 طلب سحب:', { amount, walletAddress, method, memo });
 
-        // 🔥 أولاً: تأكد من وجود عمود memo
-        await fixWithdrawalsTable();
-
-        // تحقق من البيانات الأساسية
+        // 🔥 تحقق بسيط من البيانات الأساسية أولاً
         if (!initData || !amount || !walletAddress) {
             return res.status(400).json({
                 success: false,
-                error: 'بيانات ناقصة'
+                error: 'بيانات ناقصة: initData, amount, walletAddress مطلوبة'
             });
         }
 
         if (!validateTelegramInitData(initData)) {
+            console.log('❌ فشل التحقق - رفض السحب');
             return res.status(401).json({ 
                 success: false,
                 error: 'Invalid security signature' 
             });
         }
 
+        console.log('✅ تم التحقق بنجاح - متابعة السحب');
         const telegramUser = parseTelegramUser(initData);
+        
         if (!telegramUser?.id) {
+            console.log('❌ بيانات المستخدم غير صالحة');
             return res.status(400).json({ 
                 success: false,
                 error: 'Invalid user data' 
@@ -1255,7 +1047,7 @@ app.post('/api/withdraw', async (req, res) => {
         
         await client.query('BEGIN');
 
-        // جلب المستخدم
+        // جلب المستخدم مع قفل الصف لمنع التنافس
         const userResult = await client.query(
             'SELECT * FROM bot_users WHERE telegram_id = $1 FOR UPDATE',
             [userId]
@@ -1263,6 +1055,7 @@ app.post('/api/withdraw', async (req, res) => {
         
         if (userResult.rows.length === 0) {
             await client.query('ROLLBACK');
+            console.log('❌ المستخدم غير موجود');
             return res.status(404).json({ 
                 success: false,
                 error: 'User not found' 
@@ -1273,42 +1066,47 @@ app.post('/api/withdraw', async (req, res) => {
         const userBalance = parseFloat(user.balance || 0);
         const withdrawAmount = parseFloat(amount);
         
+        console.log(`💰 رصيد المستخدم: ${userBalance} TON`);
+        console.log(`💸 مبلغ السحب: ${withdrawAmount} TON`);
+
         // التحقق من الرصيد
         if (userBalance < withdrawAmount) {
             await client.query('ROLLBACK');
+            console.log('❌ رصيد غير كافي');
             return res.status(400).json({ 
                 success: false,
                 error: 'Insufficient balance' 
             });
         }
 
-        // التحقق من الحد الأدنى للسحب
+        // التحقق من الحد الأدنى للسحب بناءً على الطريقة
         let minWithdrawal = config.minWithdrawal;
         if (method === 'TON Wallet') {
-            minWithdrawal = 0.05;
+            minWithdrawal = 0.05; // الحد الأدنى لـ TON
         }
 
         if (withdrawAmount < minWithdrawal) {
             await client.query('ROLLBACK');
+            console.log(`❌ الحد الأدنى للسحب ${minWithdrawal} TON`);
             return res.status(400).json({ 
                 success: false,
                 error: `Minimum withdrawal is ${minWithdrawal} TON` 
             });
         }
 
-        // خصم المبلغ
+        // خصم المبلغ من رصيد المستخدم
         await client.query(
             'UPDATE bot_users SET balance = balance - $1 WHERE telegram_id = $2',
             [withdrawAmount, userId]
         );
 
-        // 🔥 إدراج السحب مع memo
+        // تسجيل طلب السحب
         const withdrawalResult = await client.query(
             `INSERT INTO withdrawals 
              (user_id, amount, wallet_address, status, method, memo) 
              VALUES ($1, $2, $3, $4, $5, $6) 
              RETURNING *`,
-            [userId, withdrawAmount, walletAddress, 'pending', method, memo || '']
+            [userId, withdrawAmount, walletAddress, 'pending', method, memo]
         );
 
         await client.query('COMMIT');
@@ -1330,63 +1128,6 @@ app.post('/api/withdraw', async (req, res) => {
         res.status(500).json({ 
             success: false,
             error: 'Withdrawal failed: ' + error.message 
-        });
-    } finally {
-        client.release();
-    }
-});
-
-// 🧪 endpoint سحب للتجربة (بدون توكن) - مؤقت
-app.post('/api/test-withdraw', async (req, res) => {
-    const client = await pool.connect();
-    
-    try {
-        const { initData, amount, walletAddress, method = 'TON Wallet', memo = '' } = req.body;
-
-        console.log('🧪 TEST - طلب سحب تجريبي:', { 
-            amount, 
-            walletAddress, 
-            method, 
-            memo,
-            hasInitData: !!initData 
-        });
-
-        // 🔥 أولاً: تأكد من وجود عمود memo
-        await fixWithdrawalsTable();
-
-        // 🔥 تحقق بسيط جداً من البيانات
-        if (!amount || !walletAddress) {
-            return res.status(400).json({
-                success: false,
-                error: 'بيانات ناقصة: amount و walletAddress مطلوبين'
-            });
-        }
-
-        const withdrawAmount = parseFloat(amount);
-        
-        // تحقق من المبلغ
-        if (withdrawAmount < 0.0001) {
-            return res.status(400).json({
-                success: false,
-                error: 'الحد الأدنى للسحب هو 0.0001 TON'
-            });
-        }
-
-        // محاكاة عملية السحب الناجحة
-        console.log('✅ TEST - سحب ناجح (محاكاة)');
-        
-        res.json({
-            success: true,
-            withdrawalId: 'test_' + Date.now(),
-            newBalance: 0.0000,
-            message: 'تم تقديم طلب السحب بنجاح (وضع تجريبي)'
-        });
-
-    } catch (error) {
-        console.error('❌ TEST - خطأ في السحب:', error.message);
-        res.status(500).json({ 
-            success: false,
-            error: 'فشل في السحب: ' + error.message 
         });
     } finally {
         client.release();
@@ -1444,7 +1185,7 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
     }
 });
 
-// 🏆 نظام المسابقة المحسن
+// 🏆 نظام المسابقة المحسن (نقطة واحدة لكل إعلان)
 app.post('/api/contest/update-points', async (req, res) => {
     try {
         const { userId, points = 0, adsWatched = 0, referralsCount = 0 } = req.body;
@@ -1720,12 +1461,10 @@ app.listen(PORT, HOST, () => {
     console.log(`📊 Daily ads: ${config.dailyAdLimit} ads`);
     console.log(`💸 Min withdrawal: ${config.minWithdrawal} TON`);
     console.log(`👥 Referral bonus: ${config.referralBonus} TON`);
-    console.log(`🏆 Contest points per ad: ${config.contestAdPoints}`);
+    console.log(`🏆 Contest points per ad: ${config.contestAdPoints} (نقطة واحدة فقط)`); // ⚡ تحديث
     console.log(`🔐 Telegram verification: ENABLED`);
     console.log(`🔄 Dynamic token system: ACTIVE (10 seconds)`);
     
     // فحص الاتصال بقاعدة البيانات عند البدء
     checkDatabaseConnection();
-    // إصلاح جدول withdrawals تلقائياً
-    fixWithdrawalsTable();
 });
