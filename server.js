@@ -27,7 +27,7 @@ const config = {
     contestReferralPoints: 15 // نقاط المسابقة لكل إحالة
 };
 
-// 🔐 نظام التوكن الديناميكي كل 10 ثواني
+// 🔧 إصلاح نظام التوكن الديناميكي - الإصدار المحسن
 class DynamicTokenSystem {
     constructor() {
         this.tokens = new Map();
@@ -36,16 +36,14 @@ class DynamicTokenSystem {
         this.tokenCounter = 0;
         this.intervalId = null;
         
-        // إعدادات التوكن
         this.config = {
-            tokenRefreshInterval: 10000, // 10 ثواني
-            tokenValidityWindow: 15000, // 15 ثانية صلاحية
-            maxTokens: 10,
+            tokenRefreshInterval: 10000,
+            tokenValidityWindow: 30000, // زدناها لـ 30 ثانية
+            maxTokens: 20,
             secretKey: process.env.TOKEN_SECRET || 'ton-rewards-dynamic-token-secret-2024'
         };
     }
 
-    // توليد توكن جديد
     generateToken() {
         const timestamp = Date.now();
         this.tokenCounter++;
@@ -53,7 +51,8 @@ class DynamicTokenSystem {
         const tokenData = {
             timestamp,
             counter: this.tokenCounter,
-            random: crypto.randomBytes(32).toString('hex')
+            random: crypto.randomBytes(32).toString('hex'),
+            userAgent: 'ton-rewards-webapp'
         };
 
         const tokenString = JSON.stringify(tokenData);
@@ -61,7 +60,7 @@ class DynamicTokenSystem {
             .createHmac('sha512', this.config.secretKey)
             .update(tokenString)
             .digest('hex')
-            .substring(0, 50);
+            .substring(0, 64); // زدنا الطول لـ 64 حرف
 
         const tokenObject = {
             token,
@@ -73,32 +72,22 @@ class DynamicTokenSystem {
         return tokenObject;
     }
 
-    // بدء نظام التوكن
     start() {
-        console.log('🚀 بدء نظام التوكن الديناميكي كل 10 ثواني...');
-        
-        // توليد أول توكن
+        console.log('🚀 بدء نظام التوكن الديناميكي المحسن...');
         this.updateToken();
         
-        // جدولة تحديث التوكن
         this.intervalId = setInterval(() => {
             this.updateToken();
         }, this.config.tokenRefreshInterval);
-
-        console.log(`🔄 التوكن بيتغير كل ${this.config.tokenRefreshInterval/1000} ثانية`);
     }
 
-    // تحديث التوكن
     updateToken() {
         const newToken = this.generateToken();
-        
-        // إضافة التوكن الجديد
         this.tokens.set(newToken.token, newToken);
         this.currentToken = newToken.token;
         
-        // حفظ التاريخ
         this.tokenHistory.unshift({
-            token: newToken.token.substring(0, 15) + '...',
+            token: newToken.token.substring(0, 20) + '...',
             timestamp: new Date(newToken.timestamp).toLocaleTimeString(),
             counter: newToken.counter
         });
@@ -107,84 +96,67 @@ class DynamicTokenSystem {
             this.tokenHistory.pop();
         }
 
-        // تنظيف التوكنات المنتهية
         this.cleanExpiredTokens();
-        
-        console.log(`🔄 تحديث التوكن #${newToken.counter}: ${newToken.token.substring(0, 20)}... (${new Date().toLocaleTimeString()})`);
+        console.log(`🔄 تحديث التوكن #${newToken.counter} (${new Date().toLocaleTimeString()})`);
     }
 
-    // تنظيف التوكنات المنتهية
     cleanExpiredTokens() {
         const now = Date.now();
-        let deletedCount = 0;
-        
         for (let [token, data] of this.tokens.entries()) {
             if (data.expiresAt < now) {
                 this.tokens.delete(token);
-                deletedCount++;
             }
-        }
-        
-        if (deletedCount > 0) {
-            console.log(`🧹 تم تنظيف ${deletedCount} توكن منتهي`);
         }
     }
 
-    // التحقق من صحة التوكن
     validateToken(token) {
         if (!token || token.length < 10) {
-            console.log('❌ توكن غير صالح - فارغ أو قصير جداً');
+            console.log('❌ توكن غير صالح - فارغ أو قصير');
             return false;
         }
 
         const tokenData = this.tokens.get(token);
         if (!tokenData) {
-            console.log(`❌ توكن غير معترف به: ${token.substring(0, 10)}...`);
+            console.log('❌ توكن غير معترف به');
             return false;
         }
         
         const now = Date.now();
         if (tokenData.expiresAt < now) {
             this.tokens.delete(token);
-            console.log(`⏰ توكن منتهي: ${token.substring(0, 10)}...`);
+            console.log('⏰ توكن منتهي');
             return false;
         }
         
-        console.log(`✅ توكن صالح: ${token.substring(0, 10)}...`);
+        console.log('✅ توكن صالح');
         return true;
     }
 
-    // الحصول على التوكن الحالي
     getCurrentToken() {
         return this.currentToken;
     }
 
-    // الحصول على إحصائيات
     getStats() {
         return {
-            currentToken: this.currentToken ? this.currentToken.substring(0, 15) + '...' : null,
+            currentToken: this.currentToken ? this.currentToken.substring(0, 20) + '...' : null,
             activeTokens: this.tokens.size,
-            totalGenerated: this.tokenCounter,
-            tokenHistory: this.tokenHistory
+            totalGenerated: this.tokenCounter
         };
     }
 
-    // إيقاف النظام
     stop() {
         if (this.intervalId) {
             clearInterval(this.intervalId);
-            console.log('🛑 تم إيقاف نظام التوكن');
         }
     }
 }
 
-// تهيئة نظام التوكن
+// تهيئة نظام التوكن المحسن
 const tokenSystem = new DynamicTokenSystem();
 tokenSystem.start();
 
-// 🔧 Middleware للتحقق من التوكن الديناميكي - الإصدار المحسن
+// 🔧 middleware محسن للتحقق من التوكن
 const validateDynamicToken = (req, res, next) => {
-    // استثناء بعض ال endpoints الأساسية
     const publicEndpoints = [
         '/', '/api/token/current', '/api/token/stats', 
         '/api/check-tables', '/api/setup-database', '/api/config',
@@ -201,7 +173,7 @@ const validateDynamicToken = (req, res, next) => {
                   req.query.dynamicToken;
 
     if (!token) {
-        console.log('❌ طلب بدون توكن ديناميكي:', req.path);
+        console.log('❌ طلب بدون توكن:', req.path);
         return res.status(401).json({ 
             success: false,
             error: 'التوكن الديناميكي مطلوب',
@@ -209,17 +181,10 @@ const validateDynamicToken = (req, res, next) => {
         });
     }
 
-    // 🔥 إضافة محاولة تجديد التوكن تلقائياً
+    // 🔥 إضافة مرونة أكثر في التحقق
     if (!tokenSystem.validateToken(token)) {
         console.log('🔄 محاولة تجديد التوكن تلقائياً...');
         tokenSystem.updateToken();
-        
-        // إعادة التحقق بعد التجديد
-        const newToken = tokenSystem.getCurrentToken();
-        if (newToken && tokenSystem.validateToken(newToken)) {
-            console.log('✅ تم تجديد التوكن بنجاح');
-            return next();
-        }
         
         return res.status(401).json({ 
             success: false,
@@ -260,7 +225,6 @@ function validateTelegramInitData(initData) {
         const decodedInitData = decodeURIComponent(initData);
         const parsedData = querystring.parse(decodedInitData);
         
-        // 🔥 استخدم hash بدل signature
         const hash = parsedData.hash;
         
         console.log('🔑 الهاش المستلم:', hash);
@@ -319,10 +283,8 @@ function parseTelegramUser(initData) {
             return null;
         }
         
-        // فك تشفير JSON
         const user = JSON.parse(userStr);
         
-        // 🔥 تحقق شامل من البيانات
         if (!user || !user.id) {
             console.log('❌ بيانات المستخدم غير صالحة - id مفقود');
             return null;
@@ -361,21 +323,18 @@ async function getUserFromDB(userId) {
     }
 }
 
-// ➕ إنشاء مستخدم جديد في قاعدة البيانات - الإصدار المحمي
+// ➕ إنشاء مستخدم جديد في قاعدة البيانات
 async function createUserInDB(userData) {
     try {
         console.log('🆕 إنشاء مستخدم جديد - البيانات المستلمة:', userData);
         
-        // 🔥 تحقق شامل من البيانات
         if (!userData.telegram_id) {
             console.log('❌ خطأ: telegram_id مفقود أو undefined');
             return null;
         }
 
-        // تحويل telegram_id لـ string علشان نتأكد
         const telegramId = userData.telegram_id.toString();
         
-        // 🔥 استخدم query آمن
         const query = `
             INSERT INTO bot_users 
             (telegram_id, username, first_name, balance, earning_wallet) 
@@ -399,17 +358,14 @@ async function createUserInDB(userData) {
     } catch (error) {
         console.error('❌ خطأ في إنشاء المستخدم:', error.message);
         
-        // 🔥 إذا المستخدم موجود بالفعل، جيب بياناته
         if (error.code === '23505') {
             console.log('⚠️  المستخدم موجود بالفعل، جاري جلب البيانات...');
             return await getUserFromDB(userData.telegram_id);
         }
         
-        // 🔥 إذا العمود مش موجود، عدل الجدول أولاً
         if (error.code === '42703') {
             console.log('⚠️  أعمدة ناقصة، جاري إصلاح الجداول...');
             await fixMissingColumns();
-            // حاول تاني بعد الإصلاح
             return await createUserInDB(userData);
         }
         
@@ -459,7 +415,7 @@ app.get('/', async (req, res) => {
         status: dbConnected ? '✅ متصل بقاعدة البيانات' : '❌ خطأ في قاعدة البيانات',
         timestamp: new Date().toISOString(),
         dynamicToken: '🔄 نظام التوكن الديناميكي مفعل كل 10 ثواني',
-        config: config // إظهار الإعدادات
+        config: config
     });
 });
 
@@ -485,7 +441,7 @@ app.get('/api/token/current', (req, res) => {
     res.json({
         success: true,
         token: currentToken,
-        valid_for: '15 ثانية',
+        valid_for: '30 ثانية',
         refresh_in: '10 ثواني',
         message: 'استخدم هذا التوكن في رأس الطلب (X-Dynamic-Token: TOKEN)'
     });
@@ -524,57 +480,6 @@ app.get('/api/check-tables', async (req, res) => {
         res.status(500).json({ 
             success: false,
             error: error.message 
-        });
-    }
-});
-
-// 🔧 إصلاح مشكلة السحب نهائياً
-app.get('/api/fix-withdrawals-table', async (req, res) => {
-    try {
-        console.log('🔧 بدء إصلاح جدول السحوبات...');
-        
-        // 1. إسقاط الجدول إذا كان موجوداً (لإعادة إنشائه)
-        try {
-            await pool.query('DROP TABLE IF EXISTS withdrawals CASCADE');
-            console.log('✅ تم حذف جدول السحوبات القديم');
-        } catch (error) {
-            console.log('ℹ️  الجدول غير موجود أو لا يمكن حذفه');
-        }
-
-        // 2. إنشاء الجدول من جديد مع جميع الأعمدة
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS withdrawals (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                amount DECIMAL(15, 8) NOT NULL,
-                wallet_address TEXT NOT NULL,
-                status VARCHAR(50) DEFAULT 'pending',
-                method VARCHAR(100) DEFAULT 'TON Wallet',
-                memo TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ تم إنشاء جدول السحوبات الجديد');
-
-        // 3. إضافة فهرس للأداء
-        await pool.query(`
-            CREATE INDEX IF NOT EXISTS idx_withdrawals_user_id ON withdrawals(user_id);
-            CREATE INDEX IF NOT EXISTS idx_withdrawals_status ON withdrawals(status);
-        `);
-        console.log('✅ تم إضافة الفهارس');
-
-        res.json({
-            success: true,
-            message: 'تم إصلاح جدول السحوبات بنجاح',
-            table: 'withdrawals',
-            columns: ['id', 'user_id', 'amount', 'wallet_address', 'status', 'method', 'memo', 'created_at']
-        });
-
-    } catch (error) {
-        console.error('❌ خطأ في إصلاح جدول السحوبات:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
         });
     }
 });
@@ -717,7 +622,6 @@ app.get('/api/fix-all-tables', async (req, res) => {
 // 🧪 اختبار السحب
 app.get('/api/test-withdrawal', async (req, res) => {
     try {
-        // تحقق من وجود جدول السحوبات
         const tableCheck = await pool.query(`
             SELECT EXISTS (
                 SELECT FROM information_schema.tables 
@@ -1041,7 +945,7 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-// 📺 مشاهدة إعلان - الإصدار النهائي (بدون مشاكل المسابقة)
+// 📺 مشاهدة إعلان - الإصدار النهائي
 app.post('/api/watch-ad', async (req, res) => {
     const client = await pool.connect();
     
@@ -1095,7 +999,6 @@ app.post('/api/watch-ad', async (req, res) => {
         const today = new Date().toDateString();
         const lastAdDate = user.last_ad_date ? new Date(user.last_ad_date).toDateString() : null;
         
-        // إذا كان اليوم مختلف، إعادة تعيين العداد
         let dailyAdCount = user.daily_ad_count || 0;
         if (lastAdDate !== today) {
             dailyAdCount = 0;
@@ -1143,7 +1046,6 @@ app.post('/api/watch-ad', async (req, res) => {
                 console.log('✅ تمت مشاهدة الإعلان بنجاح + تحديث المسابقة');
             } catch (contestError) {
                 console.log('⚠️  خطأ في تحديث المسابقة:', contestError.message);
-                // نستمر حتى لو فشل تحديث المسابقة
             }
 
             await client.query('COMMIT');
@@ -1263,7 +1165,7 @@ app.post('/api/move-to-balance', async (req, res) => {
     }
 });
 
-// 💳 طلب سحب - الإصدار النهائي المصحح
+// 💳 طلب سحب - الإصدار المحسن والمصلح
 app.post('/api/withdraw', async (req, res) => {
     const client = await pool.connect();
     
@@ -1271,6 +1173,14 @@ app.post('/api/withdraw', async (req, res) => {
         const { initData, amount, walletAddress, method = 'TON Wallet', memo = '' } = req.body;
 
         console.log('📥 طلب سحب:', { amount, walletAddress, method, memo });
+
+        // 🔥 تحقق بسيط من البيانات الأساسية أولاً
+        if (!initData || !amount || !walletAddress) {
+            return res.status(400).json({
+                success: false,
+                error: 'بيانات ناقصة: initData, amount, walletAddress مطلوبة'
+            });
+        }
 
         if (!validateTelegramInitData(initData)) {
             console.log('❌ فشل التحقق - رفض السحب');
@@ -1328,13 +1238,18 @@ app.post('/api/withdraw', async (req, res) => {
             });
         }
 
-        // التحقق من الحد الأدنى للسحب
-        if (withdrawAmount < config.minWithdrawal) {
+        // التحقق من الحد الأدنى للسحب بناءً على الطريقة
+        let minWithdrawal = config.minWithdrawal;
+        if (method === 'TON Wallet') {
+            minWithdrawal = 0.05; // الحد الأدنى لـ TON
+        }
+
+        if (withdrawAmount < minWithdrawal) {
             await client.query('ROLLBACK');
-            console.log(`❌ الحد الأدنى للسحب ${config.minWithdrawal} TON`);
+            console.log(`❌ الحد الأدنى للسحب ${minWithdrawal} TON`);
             return res.status(400).json({ 
                 success: false,
-                error: `Minimum withdrawal is ${config.minWithdrawal} TON` 
+                error: `Minimum withdrawal is ${minWithdrawal} TON` 
             });
         }
 
@@ -1429,7 +1344,7 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
     }
 });
 
-// 🏆 نظام المسابقة المحسن - الإصدار المصحح
+// 🏆 نظام المسابقة المحسن
 app.post('/api/contest/update-points', async (req, res) => {
     try {
         const { userId, points = 0, adsWatched = 0, referralsCount = 0 } = req.body;
