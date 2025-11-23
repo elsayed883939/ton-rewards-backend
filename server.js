@@ -1071,7 +1071,7 @@ app.post('/api/watch-ad', async (req, res) => {
             `UPDATE bot_users SET 
                 earning_wallet = COALESCE(earning_wallet, 0) + $1,
                 total_earned = COALESCE(total_earned, 0) + $1,
-                daily_ad_count = $2,
+                daily_ad_count = $1,
                 last_ad_date = CURRENT_DATE
              WHERE telegram_id = $3 
              RETURNING *`,
