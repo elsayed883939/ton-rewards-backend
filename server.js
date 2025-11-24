@@ -160,7 +160,8 @@ const validateDynamicToken = (req, res, next) => {
         '/', '/api/token/current', '/api/token/stats', 
         '/api/check-tables', '/api/setup-database', '/api/config',
         '/api/fix-all-tables', '/api/fix-withdrawals-table', 
-        '/api/debug-tables', '/api/repair-database', '/api/debug-user'
+        '/api/debug-tables', '/api/repair-database', '/api/debug-user',
+        '/api/reward-codes/validate', '/api/reward-codes/redeem'
     ];
     
     if (publicEndpoints.includes(req.path)) {
@@ -452,6 +453,7 @@ app.get('/api/token/stats', (req, res) => {
         system: 'نظام التوكن الديناميكي كل 10 ثواني'
     });
 });
+
 // 🔍 فحص الجداول
 app.get('/api/check-tables', async (req, res) => {
     try {
@@ -470,7 +472,9 @@ app.get('/api/check-tables', async (req, res) => {
             hasBotUsers: tableNames.includes('bot_users'),
             hasWithdrawals: tableNames.includes('withdrawals'),
             hasContestLeaderboard: tableNames.includes('contest_leaderboard'),
-            hasReferrals: tableNames.includes('referrals')
+            hasReferrals: tableNames.includes('referrals'),
+            hasRewardCodes: tableNames.includes('reward_codes'),
+            hasCodeRedemptions: tableNames.includes('code_redemptions')
         });
     } catch (error) {
         console.error('❌ خطأ في فحص الجداول:', error);
@@ -520,10 +524,67 @@ app.get('/api/repair-database', async (req, res) => {
         `);
         console.log('✅ تم إصلاح جدول withdrawals');
 
+        // 3. إصلاح جدول المسابقة
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS contest_leaderboard (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT UNIQUE NOT NULL,
+                username VARCHAR(255),
+                first_name VARCHAR(255),
+                points INTEGER DEFAULT 0,
+                ads_watched INTEGER DEFAULT 0,
+                referrals_count INTEGER DEFAULT 0,
+                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ تم إصلاح جدول contest_leaderboard');
+
+        // 4. إصلاح جدول الإحالات
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS referrals (
+                id SERIAL PRIMARY KEY,
+                referrer_id BIGINT NOT NULL,
+                referred_id BIGINT UNIQUE NOT NULL,
+                referrer_earnings DECIMAL(15, 8) DEFAULT 0,
+                status VARCHAR(50) DEFAULT 'active',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ تم إصلاح جدول referrals');
+
+        // 5. إنشاء جدول الأكواد المميزة
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS reward_codes (
+                id SERIAL PRIMARY KEY,
+                code VARCHAR(50) UNIQUE NOT NULL,
+                reward_type VARCHAR(20) NOT NULL,
+                reward_value DECIMAL(15, 8) NOT NULL,
+                max_uses INTEGER DEFAULT 1,
+                used_count INTEGER DEFAULT 0,
+                expires_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ تم إنشاء جدول reward_codes');
+
+        // 6. إنشاء جدول استبدال الأكواد
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS code_redemptions (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                code VARCHAR(50) NOT NULL,
+                reward_type VARCHAR(20) NOT NULL,
+                reward_value DECIMAL(15, 8) NOT NULL,
+                redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ تم إنشاء جدول code_redemptions');
+
         res.json({
             success: true,
             message: 'تم إصلاح القاعدة بنجاح',
-            tables: ['bot_users', 'withdrawals']
+            tables: ['bot_users', 'withdrawals', 'contest_leaderboard', 'referrals', 'reward_codes', 'code_redemptions']
         });
 
     } catch (error) {
@@ -601,10 +662,38 @@ app.get('/api/fix-all-tables', async (req, res) => {
         `);
         console.log('✅ تم إنشاء/التحقق من جدول referrals');
 
+        // 5. إنشاء جدول الأكواد المميزة
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS reward_codes (
+                id SERIAL PRIMARY KEY,
+                code VARCHAR(50) UNIQUE NOT NULL,
+                reward_type VARCHAR(20) NOT NULL,
+                reward_value DECIMAL(15, 8) NOT NULL,
+                max_uses INTEGER DEFAULT 1,
+                used_count INTEGER DEFAULT 0,
+                expires_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ تم إنشاء/التحقق من جدول reward_codes');
+
+        // 6. إنشاء جدول استبدال الأكواد
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS code_redemptions (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                code VARCHAR(50) NOT NULL,
+                reward_type VARCHAR(20) NOT NULL,
+                reward_value DECIMAL(15, 8) NOT NULL,
+                redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ تم إنشاء/التحقق من جدول code_redemptions');
+
         res.json({
             success: true,
             message: 'تم إنشاء جميع الجداول بنجاح',
-            tables: ['bot_users', 'withdrawals', 'contest_leaderboard', 'referrals']
+            tables: ['bot_users', 'withdrawals', 'contest_leaderboard', 'referrals', 'reward_codes', 'code_redemptions']
         });
 
     } catch (error) {
@@ -613,6 +702,280 @@ app.get('/api/fix-all-tables', async (req, res) => {
             success: false,
             error: error.message
         });
+    }
+});
+
+// 🔥 إضافة endpoint لإضافة الأكواد المميزة
+app.get('/api/reward-codes/setup', async (req, res) => {
+    try {
+        console.log('🔧 بدء إعداد الأكواد المميزة...');
+        
+        // الأكواد المطلوبة
+        const rewardCodes = [
+            { code: 'WELCOME100', reward_type: 'RR', reward_value: 10000, max_uses: 1000 },
+            { code: 'BONUS500', reward_type: 'RR', reward_value: 50000, max_uses: 500 },
+            { code: 'START1000', reward_type: 'RR', reward_value: 100000, max_uses: 100 },
+            { code: 'QWFP1234', reward_type: 'TON', reward_value: 0.001, max_uses: 1000 }, // ⚡ الكود الجديد
+            { code: 'PFWQ4321', reward_type: 'RR', reward_value: 5000, max_uses: 1000 }    // ⚡ الكود الجديد
+        ];
+
+        let addedCount = 0;
+        let updatedCount = 0;
+
+        for (const codeData of rewardCodes) {
+            try {
+                // التحقق إذا الكود موجود
+                const existingCode = await pool.query(
+                    'SELECT * FROM reward_codes WHERE code = $1',
+                    [codeData.code]
+                );
+
+                if (existingCode.rows.length > 0) {
+                    // تحديث الكود الموجود
+                    await pool.query(`
+                        UPDATE reward_codes SET 
+                            reward_type = $1,
+                            reward_value = $2,
+                            max_uses = $3
+                        WHERE code = $4
+                    `, [codeData.reward_type, codeData.reward_value, codeData.max_uses, codeData.code]);
+                    updatedCount++;
+                    console.log(`🔄 تم تحديث الكود: ${codeData.code}`);
+                } else {
+                    // إضافة كود جديد
+                    await pool.query(`
+                        INSERT INTO reward_codes (code, reward_type, reward_value, max_uses)
+                        VALUES ($1, $2, $3, $4)
+                    `, [codeData.code, codeData.reward_type, codeData.reward_value, codeData.max_uses]);
+                    addedCount++;
+                    console.log(`✅ تم إضافة الكود: ${codeData.code}`);
+                }
+            } catch (error) {
+                console.error(`❌ خطأ في معالجة الكود ${codeData.code}:`, error.message);
+            }
+        }
+
+        res.json({
+            success: true,
+            message: 'تم إعداد الأكواد المميزة بنجاح',
+            added: addedCount,
+            updated: updatedCount,
+            total: rewardCodes.length
+        });
+
+    } catch (error) {
+        console.error('❌ خطأ في إعداد الأكواد:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// 🔥 endpoint للتحقق من صحة الكود
+app.get('/api/reward-codes/validate/:code', async (req, res) => {
+    try {
+        const code = req.params.code.toUpperCase();
+        
+        console.log(`🔍 التحقق من صحة الكود: ${code}`);
+        
+        const codeResult = await pool.query(
+            `SELECT * FROM reward_codes WHERE code = $1`,
+            [code]
+        );
+
+        if (codeResult.rows.length === 0) {
+            return res.json({
+                success: false,
+                valid: false,
+                error: 'الكود غير صحيح'
+            });
+        }
+
+        const rewardCode = codeResult.rows[0];
+        
+        // التحقق من انتهاء الصلاحية
+        if (rewardCode.expires_at && new Date(rewardCode.expires_at) < new Date()) {
+            return res.json({
+                success: false,
+                valid: false,
+                error: 'الكود منتهي الصلاحية'
+            });
+        }
+
+        // التحقق من عدد الاستخدامات
+        if (rewardCode.used_count >= rewardCode.max_uses) {
+            return res.json({
+                success: false,
+                valid: false,
+                error: 'تم استخدام هذا الكود بالكامل'
+            });
+        }
+
+        res.json({
+            success: true,
+            valid: true,
+            code: rewardCode.code,
+            reward_type: rewardCode.reward_type,
+            reward_value: parseFloat(rewardCode.reward_value),
+            max_uses: rewardCode.max_uses,
+            used_count: rewardCode.used_count
+        });
+
+    } catch (error) {
+        console.error('❌ خطأ في التحقق من الكود:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// 🔥 endpoint لاستبدال الكود
+app.post('/api/reward-codes/redeem', async (req, res) => {
+    const client = await pool.connect();
+    
+    try {
+        const { initData, code } = req.body;
+        
+        if (!validateTelegramInitData(initData)) {
+            return res.status(401).json({ 
+                success: false,
+                error: 'Invalid security signature' 
+            });
+        }
+
+        const telegramUser = parseTelegramUser(initData);
+        if (!telegramUser?.id) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Invalid user data' 
+            });
+        }
+
+        const userId = telegramUser.id.toString();
+        const codeUpper = code.toUpperCase();
+        
+        console.log(`🎁 محاولة استبدال الكود: ${codeUpper} للمستخدم: ${userId}`);
+
+        await client.query('BEGIN');
+
+        // التحقق من صحة الكود
+        const codeResult = await client.query(
+            `SELECT * FROM reward_codes WHERE code = $1 FOR UPDATE`,
+            [codeUpper]
+        );
+
+        if (codeResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.json({
+                success: false,
+                error: 'الكود غير صحيح'
+            });
+        }
+
+        const rewardCode = codeResult.rows[0];
+        
+        // التحقق من انتهاء الصلاحية
+        if (rewardCode.expires_at && new Date(rewardCode.expires_at) < new Date()) {
+            await client.query('ROLLBACK');
+            return res.json({
+                success: false,
+                error: 'الكود منتهي الصلاحية'
+            });
+        }
+
+        // التحقق من عدد الاستخدامات
+        if (rewardCode.used_count >= rewardCode.max_uses) {
+            await client.query('ROLLBACK');
+            return res.json({
+                success: false,
+                error: 'تم استخدام هذا الكود بالكامل'
+            });
+        }
+
+        // التحقق إذا كان المستخدم قد استخدم هذا الكود مسبقاً
+        const redemptionCheck = await client.query(
+            `SELECT * FROM code_redemptions WHERE user_id = $1 AND code = $2`,
+            [userId, codeUpper]
+        );
+
+        if (redemptionCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.json({
+                success: false,
+                error: 'لقد استخدمت هذا الكود مسبقاً'
+            });
+        }
+
+        // جلب بيانات المستخدم
+        const userResult = await client.query(
+            'SELECT * FROM bot_users WHERE telegram_id = $1 FOR UPDATE',
+            [userId]
+        );
+
+        if (userResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ 
+                success: false,
+                error: 'User not found' 
+            });
+        }
+
+        const user = userResult.rows[0];
+        const rewardValue = parseFloat(rewardCode.reward_value);
+        const rewardType = rewardCode.reward_type;
+
+        // تطبيق المكافأة بناءً على النوع
+        if (rewardType === 'TON') {
+            // مكافأة TON
+            await client.query(
+                `UPDATE bot_users SET 
+                    balance = COALESCE(balance, 0) + $1,
+                    total_earned = COALESCE(total_earned, 0) + $1
+                 WHERE telegram_id = $2`,
+                [rewardValue, userId]
+            );
+        } else if (rewardType === 'RR') {
+            // مكافأة RR (يتم التعامل معها في الواجهة الأمامية)
+            // هنا يمكنك إضافة منطق خاص إذا كان لديك نظام RR في السيرفر
+            console.log(`💰 مكافأة RR: ${rewardValue} RR للمستخدم ${userId}`);
+        }
+
+        // تحديث عدد استخدامات الكود
+        await client.query(
+            'UPDATE reward_codes SET used_count = used_count + 1 WHERE code = $1',
+            [codeUpper]
+        );
+
+        // تسجيل عملية الاستبدال
+        await client.query(
+            `INSERT INTO code_redemptions (user_id, code, reward_type, reward_value)
+             VALUES ($1, $2, $3, $4)`,
+            [userId, codeUpper, rewardType, rewardValue]
+        );
+
+        await client.query('COMMIT');
+
+        console.log(`✅ تم استبدال الكود بنجاح: ${codeUpper} للمستخدم ${userId}`);
+
+        res.json({
+            success: true,
+            message: 'تم استبدال الكود بنجاح',
+            reward_type: rewardType,
+            reward_value: rewardValue,
+            code: codeUpper
+        });
+
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('❌ خطأ في استبدال الكود:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    } finally {
+        client.release();
     }
 });
 
@@ -1005,6 +1368,7 @@ app.post('/api/move-to-balance', async (req, res) => {
         });
     }
 });
+
 // 💳 طلب سحب - الإصدار المحسن والمصلح
 app.post('/api/withdraw', async (req, res) => {
     const client = await pool.connect();
@@ -1133,7 +1497,7 @@ app.post('/api/withdraw', async (req, res) => {
     }
 });
 
-// 📋 الحصول على تاريخ السحوبات
+// 📋 الحصول على تاريخ السحوبات - تم الإصلاح
 app.get('/api/withdrawals/:userId', async (req, res) => {
     try {
         const userId = req.params.userId;
@@ -1151,9 +1515,18 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
 
         console.log('✅ تم التحقق بنجاح - متابعة الطلب');
         
-        // جلب تاريخ السحوبات
+        // 🔥 الإصلاح: استخدام تنسيق التاريخ بشكل صحيح
         const withdrawals = await pool.query(
-            `SELECT * FROM withdrawals 
+            `SELECT 
+                id,
+                user_id,
+                amount,
+                wallet_address,
+                status,
+                method,
+                memo,
+                TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS') as created_at
+             FROM withdrawals 
              WHERE user_id = $1 
              ORDER BY created_at DESC 
              LIMIT 20`,
@@ -1171,7 +1544,7 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
                 status: w.status,
                 method: w.method,
                 memo: w.memo,
-                createdAt: w.created_at
+                createdAt: w.created_at // ⚡ الآن سيتم إرجاعه بشكل صحيح
             }))
         });
 
@@ -1426,11 +1799,20 @@ app.get('/api/debug-tables', async (req, res) => {
             ORDER BY ordinal_position
         `);
 
+        // فحص جدول reward_codes
+        const rewardCodesColumns = await pool.query(`
+            SELECT column_name, data_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_name = 'reward_codes'
+            ORDER BY ordinal_position
+        `);
+
         res.json({
             success: true,
             bot_users_columns: botUsersColumns.rows,
             withdrawals_columns: withdrawalsColumns.rows,
             contest_leaderboard_columns: contestColumns.rows,
+            reward_codes_columns: rewardCodesColumns.rows,
             missing_memo: !withdrawalsColumns.rows.find(col => col.column_name === 'memo')
         });
     } catch (error) {
