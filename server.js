@@ -163,8 +163,7 @@ const validateDynamicToken = (req, res, next) => {
         '/api/fix-all-tables', '/api/fix-withdrawals-table', 
         '/api/debug-tables', '/api/repair-database', '/api/debug-user',
         '/api/reward-codes/validate', '/api/reward-codes/redeem',
-        '/api/fix-contest-data', '/api/fix-all-contest-data',
-        '/api/reward-codes/setup'
+        '/api/fix-contest-data', '/api/fix-all-contest-data'
     ];
     
     if (publicEndpoints.includes(req.path)) {
@@ -248,248 +247,8 @@ function validateTelegramInitData(initData) {
         const dataCheckString = dataToCheck.join('\n');
         
         // إنشاء المفتاح السري
-        const secretKey = crypto.createHmac('sha256', 'WebAppData')
-            .update(BOT_TOKEN)
-            .digest();
-        
-        // حساب الهاش
-        const calculatedHash = crypto.createHmac('sha256', secretKey)
-            .update(dataCheckString)
-            .digest('hex');
-
-        console.log('🔢 الهاش المحسوب:', calculatedHash);
-        console.log('🔢 الهاش المستلم:', hash);
-        console.log('✅ التطابق:', calculatedHash === hash ? 'ناجح' : 'فاشل');
-        
-        return calculatedHash === hash;
-    } catch (error) {
-        console.error('❌ خطأ في التحقق:', error);
-        return false;
-    }
-}
-
-// 👤 استخراج بيانات المستخدم
-function parseTelegramUser(initData) {
-    try {
-        if (!initData) {
-            console.log('❌ initData غير موجود');
-            return null;
-        }
-
-        const decodedInitData = decodeURIComponent(initData);
-        const parsedData = querystring.parse(decodedInitData);
-        const userStr = parsedData.user;
-        
-        if (!userStr) {
-            console.log('❌ لا توجد بيانات مستخدم في initData');
-            return null;
-        }
-        
-        const user = JSON.parse(userStr);
-        
-        if (!user || !user.id) {
-            console.log('❌ بيانات المستخدم غير صالحة - id مفقود');
-            return null;
-        }
-
-        console.log('✅ بيانات المستخدم صالحة:', {
-            id: user.id,
-            username: user.username,
-            first_name: user.first_name
-        });
-        
-        return user;
-        
-    } catch (error) {
-        console.error('❌ خطأ في تحليل بيانات المستخدم:', error);
-        return null;
-    }
-}
-
-// 📊 جلب المستخدم من قاعدة البيانات
-async function getUserFromDB(userId) {
-    try {
-        console.log('🗄️ جلب المستخدم من DB:', userId);
-        const result = await pool.query(
-            'SELECT * FROM bot_users WHERE telegram_id = $1',
-            [userId]
-        );
-        
-        const userExists = result.rows.length > 0;
-        console.log('✅ المستخدم موجود في DB:', userExists);
-        
-        return userExists ? result.rows[0] : null;
-    } catch (error) {
-        console.error('❌ خطأ في جلب المستخدم من DB:', error.message);
-        return null;
-    }
-}
-
-// ➕ إنشاء مستخدم جديد في قاعدة البيانات
-async function createUserInDB(userData) {
-    try {
-        console.log('🆕 إنشاء مستخدم جديد - البيانات المستلمة:', userData);
-        
-        if (!userData.telegram_id) {
-            console.log('❌ خطأ: telegram_id مفقود أو undefined');
-            return null;
-        }
-
-        const telegramId = userData.telegram_id.toString();
-        
-        const query = `
-            INSERT INTO bot_users 
-            (telegram_id, username, first_name, balance, earning_wallet) 
-            VALUES ($1, $2, $3, $4, $5) 
-            RETURNING *
-        `;
-        
-        const values = [
-            telegramId,
-            userData.username || '',
-            userData.first_name || 'مستخدم',
-            0,
-            0
-        ];
-
-        const result = await pool.query(query, values);
-        
-        console.log('✅ تم إنشاء المستخدم بنجاح');
-        return result.rows[0];
-        
-    } catch (error) {
-        console.error('❌ خطأ في إنشاء المستخدم:', error.message);
-        
-        if (error.code === '23505') {
-            console.log('⚠️  المستخدم موجود بالفعل، جاري جلب البيانات...');
-            return await getUserFromDB(userData.telegram_id);
-        }
-        
-        if (error.code === '42703') {
-            console.log('⚠️  أعمدة ناقصة، جاري إصلاح الجداول...');
-            await fixMissingColumns();
-            return await createUserInDB(userData);
-        }
-        
-        return null;
-    }
-}
-
-// 🔧 دالة لإصلاح الأعمدة الناقصة
-async function fixMissingColumns() {
-    try {
-        console.log('🔧 بدء إصلاح الأعمدة الناقصة...');
-        
-        const columnsToAdd = [
-            { name: 'username', sql: 'ADD COLUMN IF NOT EXISTS username VARCHAR(255)' },
-            { name: 'first_name', sql: 'ADD COLUMN IF NOT EXISTS first_name VARCHAR(255) NOT NULL DEFAULT \'مستخدم\'' },
-            { name: 'balance', sql: 'ADD COLUMN IF NOT EXISTS balance DECIMAL(15, 8) DEFAULT 0.00000000' },
-            { name: 'earning_wallet', sql: 'ADD COLUMN IF NOT EXISTS earning_wallet DECIMAL(15, 8) DEFAULT 0.00000000' },
-            { name: 'total_earned', sql: 'ADD COLUMN IF NOT EXISTS total_earned DECIMAL(15, 8) DEFAULT 0.00000000' },
-            { name: 'daily_ad_count', sql: 'ADD COLUMN IF NOT EXISTS daily_ad_count INTEGER DEFAULT 0' },
-            { name: 'last_ad_date', sql: 'ADD COLUMN IF NOT EXISTS last_ad_date DATE DEFAULT CURRENT_DATE' },
-            { name: 'created_at', sql: 'ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP' },
-            { name: 'last_ad_request', sql: 'ADD COLUMN IF NOT EXISTS last_ad_request TIMESTAMP' }
-        ];
-
-        for (const column of columnsToAdd) {
-            try {
-                await pool.query(`ALTER TABLE bot_users ${column.sql}`);
-                console.log(`✅ تم إضافة/التحقق من العمود: ${column.name}`);
-            } catch (error) {
-                console.log(`⚠️  تجاهل الخطأ في العمود ${column.name}:`, error.message);
-            }
-        }
-        
-        console.log('✅ تم الانتهاء من إصلاح الأعمدة');
-        return true;
-    } catch (error) {
-        console.error('❌ خطأ في إصلاح الأعمدة:', error);
-        return false;
-    }
-}
-
-// 🏠 الصفحة الرئيسية
-app.get('/', async (req, res) => {
-    const dbConnected = await checkDatabaseConnection();
-    
-    res.json({ 
-        message: 'TON Rewards Backend - جاري التشغيل',
-        status: dbConnected ? '✅ متصل بقاعدة البيانات' : '❌ خطأ في قاعدة البيانات',
-        timestamp: new Date().toISOString(),
-        dynamicToken: '🔄 نظام التوكن الديناميكي مفعل كل 10 ثواني',
-        config: config
-    });
-});
-
-// 📋 endpoint للإعدادات
-app.get('/api/config', (req, res) => {
-    res.json({
-        success: true,
-        config: {
-            adValue: config.adValue,
-            dailyAdLimit: config.dailyAdLimit,
-            minWithdrawal: config.minWithdrawal,
-            referralBonus: config.referralBonus,
-            contestAdPoints: config.contestAdPoints, // ⚡ نقطة واحدة فقط
-            contestReferralPoints: config.contestReferralPoints,
-            botUsername: "UfnpBot_bot"
-        }
-    });
-});
-
-// 🔐 endpoints خاصة بنظام التوكن
-app.get('/api/token/current', (req, res) => {
-    const currentToken = tokenSystem.getCurrentToken();
-    res.json({
-        success: true,
-        token: currentToken,
-        valid_for: '30 ثانية',
-        refresh_in: '10 ثواني',
-        message: 'استخدم هذا التوكن في رأس الطلب (X-Dynamic-Token: TOKEN)'
-    });
-});
-
-app.get('/api/token/stats', (req, res) => {
-    res.json({
-        success: true,
-        ...tokenSystem.getStats(),
-        system: 'نظام التوكن الديناميكي كل 10 ثواني'
-    });
-});
-
-// 🔍 فحص الجداول
-app.get('/api/check-tables', async (req, res) => {
-    try {
-        const tables = await pool.query(`
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_schema = 'public'
-        `);
-        
-        const tableNames = tables.rows.map(row => row.table_name);
-        console.log('📊 الجداول الموجودة:', tableNames);
-        
-        res.json({
-            success: true,
-            tables: tableNames,
-            hasBotUsers: tableNames.includes('bot_users'),
-            hasWithdrawals: tableNames.includes('withdrawals'),
-            hasContestLeaderboard: tableNames.includes('contest_leaderboard'),
-            hasReferrals: tableNames.includes('referrals'),
-            hasRewardCodes: tableNames.includes('reward_codes'),
-            hasCodeRedemptions: tableNames.includes('code_redemptions')
-        });
-    } catch (error) {
-        console.error('❌ خطأ في فحص الجداول:', error);
-        res.status(500).json({ 
-            success: false,
-            error: error.message 
-        });
-    }
-});
-
-// 🔥 إضافة endpoint لإعداد الأكواد المميزة
+        const secretKey = crypto
+        // 🔥 إضافة endpoint لإعداد الأكواد المميزة
 app.get('/api/reward-codes/setup', async (req, res) => {
     try {
         console.log('🔧 بدء إعداد الأكواد المميزة...');
@@ -761,6 +520,7 @@ app.post('/api/reward-codes/redeem', async (req, res) => {
         client.release();
     }
 });
+
 // 👤 جلب بيانات المستخدم من قاعدة البيانات + تسجيل تلقائي
 app.get('/api/user/:userId', async (req, res) => {
     try {
@@ -931,7 +691,7 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-// 📺 مشاهدة إعلان - نقطة واحدة فقط (الحل النهائي)
+// 📺 مشاهدة إعلان - الإصدار المصحح (نقطة واحدة فقط) - بدون تكرار
 app.post('/api/watch-ad', async (req, res) => {
     const client = await pool.connect();
     
@@ -963,33 +723,6 @@ app.post('/api/watch-ad', async (req, res) => {
         console.log(`👤 معالجة مشاهدة إعلان للمستخدم: ${userId}`);
         
         await client.query('BEGIN');
-
-        // 🔥 إضافة قفل لمنع التكرار - التحقق من آخر طلب
-        const lastRequestCheck = await client.query(
-            'SELECT last_ad_request FROM bot_users WHERE telegram_id = $1 FOR UPDATE',
-            [userId]
-        );
-        
-        const now = new Date();
-        if (lastRequestCheck.rows[0]?.last_ad_request) {
-            const lastRequest = new Date(lastRequestCheck.rows[0].last_ad_request);
-            const timeDiff = (now - lastRequest) / 1000; // الفرق بالثواني
-            
-            if (timeDiff < 10) { // أقل من 10 ثواني بين الطلبات
-                await client.query('ROLLBACK');
-                console.log('🚫 طلب مكرر - تم رفضه');
-                return res.status(429).json({ 
-                    success: false,
-                    error: 'Too many requests. Please wait 10 seconds.' 
-                });
-            }
-        }
-
-        // تحديث وقت آخر طلب
-        await client.query(
-            'UPDATE bot_users SET last_ad_request = $1 WHERE telegram_id = $2',
-            [now, userId]
-        );
 
         // جلب المستخدم مع قفل الصف لمنع التنافس
         const userResult = await client.query(
@@ -1044,7 +777,7 @@ app.post('/api/watch-ad', async (req, res) => {
         const updatedUser = updateResult.rows[0];
         
         if (updatedUser) {
-            // 🔥 تحديث نقاط المسابقة - نقطة واحدة فقط مع منع التكرار
+            // 🔥 تحديث نقاط المسابقة - نقطة واحدة فقط مع التحقق من التكرار
             try {
                 // التحقق أولاً من وجود المستخدم في المسابقة
                 const existingContest = await client.query(
@@ -1053,31 +786,16 @@ app.post('/api/watch-ad', async (req, res) => {
                 );
 
                 if (existingContest.rows.length > 0) {
-                    // ⚡ نقطة واحدة فقط - مع التحقق من عدم التكرار
-                    const currentPoints = existingContest.rows[0].points;
-                    const currentAds = existingContest.rows[0].ads_watched;
+                    // ⚡ نقطة واحدة فقط
+                    await client.query(`
+                        UPDATE contest_leaderboard SET 
+                            points = points + 1,
+                            ads_watched = ads_watched + 1,
+                            last_activity = CURRENT_TIMESTAMP
+                        WHERE user_id = $1
+                    `, [userId]);
                     
-                    // 🔥 التحقق: إذا كانت النقاط تساوي عدد الإعلانات، نضيف نقطة واحدة فقط
-                    if (currentPoints === currentAds) {
-                        await client.query(`
-                            UPDATE contest_leaderboard SET 
-                                points = points + 1,
-                                ads_watched = ads_watched + 1,
-                                last_activity = CURRENT_TIMESTAMP
-                            WHERE user_id = $1
-                        `, [userId]);
-                        console.log(`✅ تم تحديث المسابقة: +1 نقطة للمستخدم ${userId}`);
-                    } else {
-                        // إذا كانت النقاط أكثر من الإعلانات، نصحح البيانات أولاً
-                        await client.query(`
-                            UPDATE contest_leaderboard SET 
-                                points = ads_watched + 1,
-                                ads_watched = ads_watched + 1,
-                                last_activity = CURRENT_TIMESTAMP
-                            WHERE user_id = $1
-                        `, [userId]);
-                        console.log(`✅ تم تصحيح وتحديث المسابقة: +1 نقطة للمستخدم ${userId}`);
-                    }
+                    console.log(`✅ تم تحديث المسابقة: +1 نقطة للمستخدم ${userId}`);
                 } else {
                     // ⚡ نقطة واحدة فقط
                     await client.query(`
@@ -1125,7 +843,6 @@ app.post('/api/watch-ad', async (req, res) => {
         client.release();
     }
 });
-
 // 💰 تحويل المحفظة إلى الرصيد
 app.post('/api/move-to-balance', async (req, res) => {
     try {
@@ -1419,6 +1136,7 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
         });
     }
 });
+
 // 🏆 نظام المسابقة المحسن (نقطة واحدة فقط لكل إعلان)
 app.post('/api/contest/update-points', async (req, res) => {
     try {
@@ -1745,230 +1463,6 @@ app.post('/api/fix-all-contest-data', async (req, res) => {
     }
 });
 
-// 🔧 إصلاح جميع الجداول
-app.get('/api/fix-all-tables', async (req, res) => {
-    try {
-        console.log('🔧 بدء إصلاح جميع الجداول...');
-        
-        // إصلاح جدول bot_users
-        await fixMissingColumns();
-        
-        // إنشاء جدول المسابقة إذا لم يكن موجوداً
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS contest_leaderboard (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT UNIQUE NOT NULL,
-                username VARCHAR(255),
-                first_name VARCHAR(255),
-                points INTEGER DEFAULT 0,
-                ads_watched INTEGER DEFAULT 0,
-                referrals_count INTEGER DEFAULT 0,
-                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        
-        // إنشاء جدول السحوبات إذا لم يكن موجوداً
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS withdrawals (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                amount DECIMAL(15, 8) NOT NULL,
-                wallet_address TEXT NOT NULL,
-                status VARCHAR(50) DEFAULT 'pending',
-                method VARCHAR(100) DEFAULT 'TON Wallet',
-                memo TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        
-        // إنشاء جدول الأكواد المميزة إذا لم يكن موجوداً
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS reward_codes (
-                id SERIAL PRIMARY KEY,
-                code VARCHAR(50) UNIQUE NOT NULL,
-                reward_type VARCHAR(20) NOT NULL,
-                reward_value DECIMAL(15, 8) NOT NULL,
-                max_uses INTEGER DEFAULT 1000,
-                used_count INTEGER DEFAULT 0,
-                expires_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        
-        // إنشاء جدول استبدال الأكواد إذا لم يكن موجوداً
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS code_redemptions (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                code VARCHAR(50) NOT NULL,
-                reward_type VARCHAR(20) NOT NULL,
-                reward_value DECIMAL(15, 8) NOT NULL,
-                redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        
-        // إنشاء جدول الإحالات إذا لم يكن موجوداً
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS referrals (
-                id SERIAL PRIMARY KEY,
-                referrer_id BIGINT NOT NULL,
-                referred_id BIGINT UNIQUE NOT NULL,
-                status VARCHAR(50) DEFAULT 'active',
-                referrer_earnings DECIMAL(15, 8) DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        
-        console.log('✅ تم إصلاح جميع الجداول بنجاح');
-        
-        res.json({
-            success: true,
-            message: 'تم إصلاح جميع الجداول بنجاح',
-            tables: ['bot_users', 'contest_leaderboard', 'withdrawals', 'reward_codes', 'code_redemptions', 'referrals']
-        });
-        
-    } catch (error) {
-        console.error('❌ خطأ في إصلاح الجداول:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// 🔧 إصلاح جدول السحوبات
-app.get('/api/fix-withdrawals-table', async (req, res) => {
-    try {
-        console.log('🔧 بدء إصلاح جدول السحوبات...');
-        
-        // إضافة الأعمدة الناقصة في جدول السحوبات
-        const columnsToAdd = [
-            { name: 'memo', sql: 'ADD COLUMN IF NOT EXISTS memo TEXT' },
-            { name: 'method', sql: 'ADD COLUMN IF NOT EXISTS method VARCHAR(100) DEFAULT \'TON Wallet\'' }
-        ];
-
-        for (const column of columnsToAdd) {
-            try {
-                await pool.query(`ALTER TABLE withdrawals ${column.sql}`);
-                console.log(`✅ تم إضافة/التحقق من العمود: ${column.name}`);
-            } catch (error) {
-                console.log(`⚠️  تجاهل الخطأ في العمود ${column.name}:`, error.message);
-            }
-        }
-        
-        console.log('✅ تم إصلاح جدول السحوبات بنجاح');
-        
-        res.json({
-            success: true,
-            message: 'تم إصلاح جدول السحوبات بنجاح'
-        });
-        
-    } catch (error) {
-        console.error('❌ خطأ في إصلاح جدول السحوبات:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// 🔧 إصلاح قاعدة البيانات بالكامل
-app.get('/api/repair-database', async (req, res) => {
-    try {
-        console.log('🔧 بدء إصلاح قاعدة البيانات بالكامل...');
-        
-        // إصلاح جميع الجداول
-        await pool.query(`
-            DO $$ 
-            BEGIN
-                -- إنشاء جدول المستخدمين إذا لم يكن موجوداً
-                CREATE TABLE IF NOT EXISTS bot_users (
-                    id SERIAL PRIMARY KEY,
-                    telegram_id BIGINT UNIQUE NOT NULL,
-                    username VARCHAR(255),
-                    first_name VARCHAR(255) NOT NULL DEFAULT 'مستخدم',
-                    balance DECIMAL(15, 8) DEFAULT 0.00000000,
-                    earning_wallet DECIMAL(15, 8) DEFAULT 0.00000000,
-                    total_earned DECIMAL(15, 8) DEFAULT 0.00000000,
-                    daily_ad_count INTEGER DEFAULT 0,
-                    last_ad_date DATE DEFAULT CURRENT_DATE,
-                    last_ad_request TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                
-                -- إنشاء جدول المسابقة
-                CREATE TABLE IF NOT EXISTS contest_leaderboard (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT UNIQUE NOT NULL,
-                    username VARCHAR(255),
-                    first_name VARCHAR(255),
-                    points INTEGER DEFAULT 0,
-                    ads_watched INTEGER DEFAULT 0,
-                    referrals_count INTEGER DEFAULT 0,
-                    last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                
-                -- إنشاء جدول السحوبات
-                CREATE TABLE IF NOT EXISTS withdrawals (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    amount DECIMAL(15, 8) NOT NULL,
-                    wallet_address TEXT NOT NULL,
-                    status VARCHAR(50) DEFAULT 'pending',
-                    method VARCHAR(100) DEFAULT 'TON Wallet',
-                    memo TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                
-                -- إنشاء جدول الأكواد المميزة
-                CREATE TABLE IF NOT EXISTS reward_codes (
-                    id SERIAL PRIMARY KEY,
-                    code VARCHAR(50) UNIQUE NOT NULL,
-                    reward_type VARCHAR(20) NOT NULL,
-                    reward_value DECIMAL(15, 8) NOT NULL,
-                    max_uses INTEGER DEFAULT 1000,
-                    used_count INTEGER DEFAULT 0,
-                    expires_at TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                
-                -- إنشاء جدول استبدال الأكواد
-                CREATE TABLE IF NOT EXISTS code_redemptions (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    code VARCHAR(50) NOT NULL,
-                    reward_type VARCHAR(20) NOT NULL,
-                    reward_value DECIMAL(15, 8) NOT NULL,
-                    redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                
-                -- إنشاء جدول الإحالات
-                CREATE TABLE IF NOT EXISTS referrals (
-                    id SERIAL PRIMARY KEY,
-                    referrer_id BIGINT NOT NULL,
-                    referred_id BIGINT UNIQUE NOT NULL,
-                    status VARCHAR(50) DEFAULT 'active',
-                    referrer_earnings DECIMAL(15, 8) DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                
-                RAISE NOTICE '✅ تم إنشاء/التحقق من جميع الجداول بنجاح';
-            EXCEPTION
-                WHEN others THEN
-                    RAISE NOTICE '❌ خطأ في إنشاء الجداول: %', SQLERRM;
-            END $$;
-        `);
-        
-        console.log('✅ تم إصلاح قاعدة البيانات بالكامل بنجاح');
-        
-        res.json({
-            success: true,
-            message: 'تم إصلاح قاعدة البيانات بالكامل بنجاح',
-            tables: ['bot_users', 'contest_leaderboard', 'withdrawals', 'reward_codes', 'code_redemptions', 'referrals']
-        });
-        
-    } catch (error) {
-        console.error('❌ خطأ في إصلاح قاعدة البيانات:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
 // 🔍 فحص بيانات مستخدم معين
 app.get('/api/debug-user/:userId', async (req, res) => {
     try {
@@ -2046,30 +1540,12 @@ app.get('/api/debug-tables', async (req, res) => {
             ORDER BY ordinal_position
         `);
 
-        // فحص جدول code_redemptions
-        const codeRedemptionsColumns = await pool.query(`
-            SELECT column_name, data_type, is_nullable
-            FROM information_schema.columns
-            WHERE table_name = 'code_redemptions'
-            ORDER BY ordinal_position
-        `);
-
-        // فحص جدول referrals
-        const referralsColumns = await pool.query(`
-            SELECT column_name, data_type, is_nullable
-            FROM information_schema.columns
-            WHERE table_name = 'referrals'
-            ORDER BY ordinal_position
-        `);
-
         res.json({
             success: true,
             bot_users_columns: botUsersColumns.rows,
             withdrawals_columns: withdrawalsColumns.rows,
             contest_leaderboard_columns: contestColumns.rows,
             reward_codes_columns: rewardCodesColumns.rows,
-            code_redemptions_columns: codeRedemptionsColumns.rows,
-            referrals_columns: referralsColumns.rows,
             missing_memo: !withdrawalsColumns.rows.find(col => col.column_name === 'memo')
         });
     } catch (error) {
