@@ -10,6 +10,7 @@ app.use(express.json());
 
 // 🎯 البوت توكن
 const BOT_TOKEN = "8257278435:AAHkhaFLpI4J7uYL4xpAEp4_-hc5DnW5yno"; 
+
 // الاتصال بقاعدة البيانات
 const pool = new Pool({
     connectionString: "postgresql://postgres:EBEXkZAIxdoDqsUNjaYJNcjLdDvuHtSU@maglev.proxy.rlwy.net:12181/railway",
@@ -199,7 +200,6 @@ const validateDynamicToken = (req, res, next) => {
 
 // تطبيق middleware التوكن الديناميكي على جميع ال routes
 app.use(validateDynamicToken);
-
 // 🔧 دالة للتحقق من اتصال قاعدة البيانات
 async function checkDatabaseConnection() {
     try {
@@ -405,7 +405,6 @@ async function fixMissingColumns() {
         return false;
     }
 }
-
 // 🏠 الصفحة الرئيسية
 app.get('/', async (req, res) => {
     const dbConnected = await checkDatabaseConnection();
@@ -430,7 +429,7 @@ app.get('/api/config', (req, res) => {
             referralBonus: config.referralBonus,
             contestAdPoints: config.contestAdPoints, // ⚡ نقطة واحدة فقط
             contestReferralPoints: config.contestReferralPoints,
-            botUsername: "Aborabie777_bot"
+            botUsername: "UfnpBot_bot"
         }
     });
 });
@@ -485,226 +484,6 @@ app.get('/api/check-tables', async (req, res) => {
         });
     }
 });
-// 🔧 إصلاح شامل للقاعدة
-app.get('/api/repair-database', async (req, res) => {
-    try {
-        console.log('🔧 بدء إصلاح شامل للقاعدة...');
-        
-        // 1. إصلاح جدول المستخدمين
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS bot_users (
-                id SERIAL PRIMARY KEY,
-                telegram_id BIGINT UNIQUE NOT NULL,
-                username VARCHAR(255),
-                first_name VARCHAR(255) NOT NULL DEFAULT 'مستخدم',
-                balance DECIMAL(15, 8) DEFAULT 0.00000000,
-                earning_wallet DECIMAL(15, 8) DEFAULT 0.00000000,
-                total_earned DECIMAL(15, 8) DEFAULT 0.00000000,
-                daily_ad_count INTEGER DEFAULT 0,
-                last_ad_date DATE DEFAULT CURRENT_DATE,
-                referrals INTEGER DEFAULT 0,
-                referred_by BIGINT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ تم إصلاح جدول bot_users');
-
-        // 2. إصلاح جدول السحوبات
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS withdrawals (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                amount DECIMAL(15, 8) NOT NULL,
-                wallet_address TEXT NOT NULL,
-                status VARCHAR(50) DEFAULT 'pending',
-                method VARCHAR(100) DEFAULT 'TON Wallet',
-                memo TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ تم إصلاح جدول withdrawals');
-
-        // 3. إصلاح جدول المسابقة
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS contest_leaderboard (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT UNIQUE NOT NULL,
-                username VARCHAR(255),
-                first_name VARCHAR(255),
-                points INTEGER DEFAULT 0,
-                ads_watched INTEGER DEFAULT 0,
-                referrals_count INTEGER DEFAULT 0,
-                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ تم إصلاح جدول contest_leaderboard');
-
-        // 4. إصلاح جدول الإحالات
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS referrals (
-                id SERIAL PRIMARY KEY,
-                referrer_id BIGINT NOT NULL,
-                referred_id BIGINT UNIQUE NOT NULL,
-                referrer_earnings DECIMAL(15, 8) DEFAULT 0,
-                status VARCHAR(50) DEFAULT 'active',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ تم إصلاح جدول referrals');
-
-        // 5. إنشاء جدول الأكواد المميزة
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS reward_codes (
-                id SERIAL PRIMARY KEY,
-                code VARCHAR(50) UNIQUE NOT NULL,
-                reward_type VARCHAR(20) NOT NULL,
-                reward_value DECIMAL(15, 8) NOT NULL,
-                max_uses INTEGER DEFAULT 1,
-                used_count INTEGER DEFAULT 0,
-                expires_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ تم إنشاء جدول reward_codes');
-
-        // 6. إنشاء جدول استبدال الأكواد
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS code_redemptions (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                code VARCHAR(50) NOT NULL,
-                reward_type VARCHAR(20) NOT NULL,
-                reward_value DECIMAL(15, 8) NOT NULL,
-                redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ تم إنشاء جدول code_redemptions');
-
-        res.json({
-            success: true,
-            message: 'تم إصلاح القاعدة بنجاح',
-            tables: ['bot_users', 'withdrawals', 'contest_leaderboard', 'referrals', 'reward_codes', 'code_redemptions']
-        });
-
-    } catch (error) {
-        console.error('❌ خطأ في إصلاح القاعدة:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// 🔧 إضافة endpoint لإنشاء جميع الجداول المطلوبة
-app.get('/api/fix-all-tables', async (req, res) => {
-    try {
-        console.log('🔧 بدء إصلاح جميع الجداول...');
-        
-        // 1. إنشاء جدول bot_users إذا لم يكن موجوداً
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS bot_users (
-                id SERIAL PRIMARY KEY,
-                telegram_id BIGINT UNIQUE NOT NULL,
-                username VARCHAR(255),
-                first_name VARCHAR(255) NOT NULL DEFAULT 'مستخدم',
-                balance DECIMAL(15, 8) DEFAULT 0.00000000,
-                earning_wallet DECIMAL(15, 8) DEFAULT 0.00000000,
-                total_earned DECIMAL(15, 8) DEFAULT 0.00000000,
-                daily_ad_count INTEGER DEFAULT 0,
-                last_ad_date DATE DEFAULT CURRENT_DATE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ تم إنشاء/التحقق من جدول bot_users');
-
-        // 2. إنشاء جدول withdrawals مع العمود memo
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS withdrawals (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                amount DECIMAL(15, 8) NOT NULL,
-                wallet_address TEXT NOT NULL,
-                status VARCHAR(50) DEFAULT 'pending',
-                method VARCHAR(100) DEFAULT 'TON Wallet',
-                memo TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ تم إنشاء/التحقق من جدول withdrawals');
-
-        // 3. إنشاء جدول contest_leaderboard
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS contest_leaderboard (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT UNIQUE NOT NULL,
-                username VARCHAR(255),
-                first_name VARCHAR(255),
-                points INTEGER DEFAULT 0,
-                ads_watched INTEGER DEFAULT 0,
-                referrals_count INTEGER DEFAULT 0,
-                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ تم إنشاء/التحقق من جدول contest_leaderboard');
-
-        // 4. إنشاء جدول referrals
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS referrals (
-                id SERIAL PRIMARY KEY,
-                referrer_id BIGINT NOT NULL,
-                referred_id BIGINT UNIQUE NOT NULL,
-                referrer_earnings DECIMAL(15, 8) DEFAULT 0,
-                status VARCHAR(50) DEFAULT 'active',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ تم إنشاء/التحقق من جدول referrals');
-
-        // 5. إنشاء جدول الأكواد المميزة
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS reward_codes (
-                id SERIAL PRIMARY KEY,
-                code VARCHAR(50) UNIQUE NOT NULL,
-                reward_type VARCHAR(20) NOT NULL,
-                reward_value DECIMAL(15, 8) NOT NULL,
-                max_uses INTEGER DEFAULT 1,
-                used_count INTEGER DEFAULT 0,
-                expires_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ تم إنشاء/التحقق من جدول reward_codes');
-
-        // 6. إنشاء جدول استبدال الأكواد
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS code_redemptions (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                code VARCHAR(50) NOT NULL,
-                reward_type VARCHAR(20) NOT NULL,
-                reward_value DECIMAL(15, 8) NOT NULL,
-                redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ تم إنشاء/التحقق من جدول code_redemptions');
-
-        res.json({
-            success: true,
-            message: 'تم إنشاء جميع الجداول بنجاح',
-            tables: ['bot_users', 'withdrawals', 'contest_leaderboard', 'referrals', 'reward_codes', 'code_redemptions']
-        });
-
-    } catch (error) {
-        console.error('❌ خطأ في إنشاء الجداول:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
 // 🔥 إضافة endpoint لإضافة الأكواد المميزة
 app.get('/api/reward-codes/setup', async (req, res) => {
     try {
@@ -715,8 +494,8 @@ app.get('/api/reward-codes/setup', async (req, res) => {
             { code: 'WELCOME100', reward_type: 'RR', reward_value: 10000, max_uses: 1000 },
             { code: 'BONUS500', reward_type: 'RR', reward_value: 50000, max_uses: 500 },
             { code: 'START1000', reward_type: 'RR', reward_value: 100000, max_uses: 100 },
-            { code: 'QWFP1234', reward_type: 'TON', reward_value: 0.001, max_uses: 1000 }, // ⚡ الكود الجديد
-            { code: 'PFWQ4321', reward_type: 'RR', reward_value: 5000, max_uses: 1000 }    // ⚡ الكود الجديد
+            { code: 'QWFP1234', reward_type: 'TON', reward_value: 0.001, max_uses: 1000 },
+            { code: 'PFWQ4321', reward_type: 'RR', reward_value: 5000, max_uses: 1000 }
         ];
 
         let addedCount = 0;
@@ -938,7 +717,6 @@ app.post('/api/reward-codes/redeem', async (req, res) => {
             );
         } else if (rewardType === 'RR') {
             // مكافأة RR (يتم التعامل معها في الواجهة الأمامية)
-            // هنا يمكنك إضافة منطق خاص إذا كان لديك نظام RR في السيرفر
             console.log(`💰 مكافأة RR: ${rewardValue} RR للمستخدم ${userId}`);
         }
 
@@ -1147,7 +925,6 @@ app.post('/api/register', async (req, res) => {
         });
     }
 });
-
 // 📺 مشاهدة إعلان - الإصدار المصحح (نقطة واحدة فقط)
 app.post('/api/watch-ad', async (req, res) => {
     const client = await pool.connect();
@@ -1243,26 +1020,31 @@ app.post('/api/watch-ad', async (req, res) => {
                 );
 
                 if (existingContest.rows.length > 0) {
-                    // تحديث النقاط بنقطة واحدة فقط
+                    // ⚡ الإصلاح: تحديث النقاط بنقطة واحدة فقط وإعلان واحد فقط
                     await client.query(`
                         UPDATE contest_leaderboard SET 
-                            points = points + $1,
-                            ads_watched = ads_watched + $2,
+                            points = points + 1,
+                            ads_watched = ads_watched + 1,
                             last_activity = CURRENT_TIMESTAMP
-                        WHERE user_id = $3
-                    `, [config.contestAdPoints, 1, userId]);
+                        WHERE user_id = $1
+                    `, [userId]);
+                    
+                    console.log(`✅ تم تحديث المسابقة: +1 نقطة للمستخدم ${userId}`);
                 } else {
-                    // إدخال جديد بنقطة واحدة فقط
+                    // ⚡ الإصلاح: إدخال جديد بنقطة واحدة فقط وإعلان واحد فقط
                     await client.query(`
                         INSERT INTO contest_leaderboard 
                         (user_id, username, first_name, points, ads_watched, last_activity)
-                        VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
-                    `, [userId, user.username || '', user.first_name || 'User', config.contestAdPoints, 1]);
+                        VALUES ($1, $2, $3, 1, 1, CURRENT_TIMESTAMP)
+                    `, [userId, user.username || '', user.first_name || 'User']);
+                    
+                    console.log(`✅ تم إدخال جديد في المسابقة: +1 نقطة للمستخدم ${userId}`);
                 }
                 
                 console.log('✅ تمت مشاهدة الإعلان بنجاح + نقطة مسابقة واحدة');
             } catch (contestError) {
                 console.log('⚠️  خطأ في تحديث المسابقة:', contestError.message);
+                // لا نوقف العملية إذا فشل تحديث المسابقة
             }
 
             await client.query('COMMIT');
@@ -1273,7 +1055,245 @@ app.post('/api/watch-ad', async (req, res) => {
                 earningWallet: parseFloat(updatedUser.earning_wallet || 0),
                 dailyRemaining: config.dailyAdLimit - (dailyAdCount + 1),
                 totalEarned: parseFloat(updatedUser.total_earned || 0),
-                contestPoints: config.contestAdPoints // ⚡ نقطة واحدة فقط
+                contestPoints: 1 // ⚡ نقطة واحدة فقط
+            });
+        } else {
+            await client.query('ROLLBACK');
+            console.log('❌ فشل في معالجة الإعلان');
+            res.status(500).json({ 
+                success: false,
+                error: 'Failed to process ad' 
+            });
+        }
+
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('❌ خطأ في مشاهدة الإعلان:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: 'Failed to process ad: ' + error.message 
+        });
+    } finally {
+        client.release();
+    }
+});
+
+// 💰 تحويل المحفظة إلى الرصيد
+app.post('/api/move-to-balance', async (req, res) => {
+    try {
+        const { initData } = req.body;
+
+        console.log('📥 طلب تحويل الرصيد');
+
+        if (!validateTelegramInitData(initData)) {
+            console.log('❌ فشل التحقق - رفض التحويل');
+            return res.status(401).json({ 
+                success: false,
+                error: 'Invalid security signature' 
+            });
+        }
+
+        console.log('✅ تم التحقق بنجاح - متابعة التحويل');
+        const telegramUser = parseTelegramUser(initData);
+        
+        if (!telegramUser?.id) {
+            console.log('❌ بيانات المستخدم غير صالحة');
+            return res.status(400).json({ 
+                success: false,
+                error: 'Invalid user data' 
+            });
+        }
+
+        const userId = telegramUser.id.toString();
+        console.log(`👤 معالجة تحويل الرصيد للمستخدم: ${userId}`);
+        
+        const user = await getUserFromDB(userId);
+        
+        if (!user) {
+            console.log('❌ المستخدم غير موجود');
+            return res.status(404).json({ 
+                success: false,
+                error: 'User not found' 
+            });
+        }
+
+        const earningWallet = parseFloat(user.earning_wallet || 0);
+        console.log(`💰 الرصيد المتاح للتحويل: ${earningWallet} TON`);
+        
+        if (earningWallet < 0.0001) {
+            console.log('❌ الرصيد غير كافي للتحويل');
+            return res.status(400).json({ 
+                success: false,
+                error: 'Minimum 0.0001 TON required' 
+            });
+        }
+
+        // تحديث الرصيد في قاعدة البيانات
+        const updateResult = await pool.query(
+            `UPDATE bot_users SET 
+                balance = COALESCE(balance, 0) + $1,
+                earning_wallet = 0
+             WHERE telegram_id = $2 
+             RETURNING *`,
+            [earningWallet, userId]
+        );
+
+        const updatedUser = updateResult.rows[0];
+        
+        if (updatedUser) {
+            console.log('✅ تم تحويل الرصيد بنجاح');
+            res.json({
+                success: true,
+                newBalance: parseFloat(updatedUser.balance || 0),
+                earningWallet: 0
+            });
+        } else {
+            console.log('❌ فشل في تحويل الرصيد');
+            res.status(500).json({ 
+                success: false,
+                error: 'Transfer failed' 
+            });
+        }
+
+    } catch (error) {
+        console.error('❌ خطأ في تحويل الرصيد:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: 'Transfer failed' 
+        });
+    }
+});
+// 📺 مشاهدة إعلان - الإصدار المصحح (نقطة واحدة فقط)
+app.post('/api/watch-ad', async (req, res) => {
+    const client = await pool.connect();
+    
+    try {
+        const { initData } = req.body;
+
+        console.log('📥 طلب مشاهدة إعلان');
+
+        if (!validateTelegramInitData(initData)) {
+            console.log('❌ فشل التحقق - رفض مشاهدة الإعلان');
+            return res.status(401).json({ 
+                success: false,
+                error: 'Invalid security signature' 
+            });
+        }
+
+        console.log('✅ تم التحقق بنجاح - متابعة مشاهدة الإعلان');
+        const telegramUser = parseTelegramUser(initData);
+        
+        if (!telegramUser?.id) {
+            console.log('❌ بيانات المستخدم غير صالحة');
+            return res.status(400).json({ 
+                success: false,
+                error: 'Invalid user data' 
+            });
+        }
+
+        const userId = telegramUser.id.toString();
+        console.log(`👤 معالجة مشاهدة إعلان للمستخدم: ${userId}`);
+        
+        await client.query('BEGIN');
+
+        // جلب المستخدم مع قفل الصف لمنع التنافس
+        const userResult = await client.query(
+            'SELECT * FROM bot_users WHERE telegram_id = $1 FOR UPDATE',
+            [userId]
+        );
+        
+        if (userResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            console.log('❌ المستخدم غير موجود - يجب التسجيل أولاً');
+            return res.status(404).json({ 
+                success: false,
+                error: 'User not found - Please register first' 
+            });
+        }
+
+        const user = userResult.rows[0];
+
+        // 🔥 التحقق من الحد اليومي للإعلانات
+        const today = new Date().toDateString();
+        const lastAdDate = user.last_ad_date ? new Date(user.last_ad_date).toDateString() : null;
+        
+        let dailyAdCount = user.daily_ad_count || 0;
+        if (lastAdDate !== today) {
+            dailyAdCount = 0;
+        }
+
+        if (dailyAdCount >= config.dailyAdLimit) {
+            await client.query('ROLLBACK');
+            console.log('❌ وصل للحد اليومي للإعلانات');
+            return res.status(400).json({ 
+                success: false,
+                error: 'Daily ad limit reached' 
+            });
+        }
+
+        // تحديث البيانات في قاعدة البيانات
+        const adReward = config.adValue;
+        console.log(`💰 مكافأة الإعلان: ${adReward} TON`);
+        
+        const updateResult = await client.query(
+            `UPDATE bot_users SET 
+                earning_wallet = COALESCE(earning_wallet, 0) + $1,
+                total_earned = COALESCE(total_earned, 0) + $1,
+                daily_ad_count = $2,
+                last_ad_date = CURRENT_DATE
+             WHERE telegram_id = $3 
+             RETURNING *`,
+            [adReward, dailyAdCount + 1, userId]
+        );
+
+        const updatedUser = updateResult.rows[0];
+        
+        if (updatedUser) {
+            // 🔥 تحديث نقاط المسابقة - نقطة واحدة فقط مع التحقق من التكرار
+            try {
+                // التحقق أولاً من وجود المستخدم في المسابقة
+                const existingContest = await client.query(
+                    'SELECT * FROM contest_leaderboard WHERE user_id = $1',
+                    [userId]
+                );
+
+                if (existingContest.rows.length > 0) {
+                    // ⚡ الإصلاح: تحديث النقاط بنقطة واحدة فقط وإعلان واحد فقط
+                    await client.query(`
+                        UPDATE contest_leaderboard SET 
+                            points = points + 1,
+                            ads_watched = ads_watched + 1,
+                            last_activity = CURRENT_TIMESTAMP
+                        WHERE user_id = $1
+                    `, [userId]);
+                    
+                    console.log(`✅ تم تحديث المسابقة: +1 نقطة للمستخدم ${userId}`);
+                } else {
+                    // ⚡ الإصلاح: إدخال جديد بنقطة واحدة فقط وإعلان واحد فقط
+                    await client.query(`
+                        INSERT INTO contest_leaderboard 
+                        (user_id, username, first_name, points, ads_watched, last_activity)
+                        VALUES ($1, $2, $3, 1, 1, CURRENT_TIMESTAMP)
+                    `, [userId, user.username || '', user.first_name || 'User']);
+                    
+                    console.log(`✅ تم إدخال جديد في المسابقة: +1 نقطة للمستخدم ${userId}`);
+                }
+                
+                console.log('✅ تمت مشاهدة الإعلان بنجاح + نقطة مسابقة واحدة');
+            } catch (contestError) {
+                console.log('⚠️  خطأ في تحديث المسابقة:', contestError.message);
+                // لا نوقف العملية إذا فشل تحديث المسابقة
+            }
+
+            await client.query('COMMIT');
+            
+            res.json({
+                success: true,
+                amount: adReward,
+                earningWallet: parseFloat(updatedUser.earning_wallet || 0),
+                dailyRemaining: config.dailyAdLimit - (dailyAdCount + 1),
+                totalEarned: parseFloat(updatedUser.total_earned || 0),
+                contestPoints: 1 // ⚡ نقطة واحدة فقط
             });
         } else {
             await client.query('ROLLBACK');
@@ -1588,6 +1608,235 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
         });
     }
 });
+// 🏆 نظام المسابقة المحسن (نقطة واحدة لكل إعلان)
+app.post('/api/contest/update-points', async (req, res) => {
+    try {
+        const { userId, points = 0, adsWatched = 0, referralsCount = 0 } = req.body;
+        
+        console.log(`🔄 تحديث نقاط المسابقة للمستخدم: ${userId}`, { points, adsWatched, referralsCount });
+        
+        // جلب بيانات المستخدم أولاً
+        const userResult = await pool.query(
+            'SELECT * FROM bot_users WHERE telegram_id = $1',
+            [userId]
+        );
+        
+        if (userResult.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'User not found' });
+        }
+        
+        const user = userResult.rows[0];
+        
+        // التأكد من وجود جدول المسابقة
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS contest_leaderboard (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT UNIQUE NOT NULL,
+                username VARCHAR(255),
+                first_name VARCHAR(255),
+                points INTEGER DEFAULT 0,
+                ads_watched INTEGER DEFAULT 0,
+                referrals_count INTEGER DEFAULT 0,
+                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        
+        // ⚡ الإصلاح: استخدام القيم الفعلية الممررة بدلاً من config
+        const actualPoints = points > 0 ? points : 1; // نقطة واحدة كحد أدنى
+        const actualAds = adsWatched > 0 ? adsWatched : 1; // إعلان واحد كحد أدنى
+        
+        // تحديث أو إدخال بيانات المسابقة
+        const result = await pool.query(`
+            INSERT INTO contest_leaderboard 
+            (user_id, username, first_name, points, ads_watched, referrals_count, last_activity)
+            VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id) 
+            DO UPDATE SET 
+                points = contest_leaderboard.points + EXCLUDED.points,
+                ads_watched = contest_leaderboard.ads_watched + EXCLUDED.ads_watched,
+                referrals_count = contest_leaderboard.referrals_count + EXCLUDED.referrals_count,
+                last_activity = EXCLUDED.last_activity
+            RETURNING *
+        `, [userId, user.username || '', user.first_name || 'User', actualPoints, actualAds, referralsCount]);
+        
+        console.log('✅ تم تحديث المسابقة بنجاح:', result.rows[0]);
+        
+        res.json({
+            success: true,
+            contestData: result.rows[0],
+            message: 'تم تحديث نقاط المسابقة بنجاح'
+        });
+    } catch (error) {
+        console.error('❌ خطأ في تحديث نقاط المسابقة:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 🏆 جلب المتصدرين مرتبين حسب النقاط - تحديث فوري
+app.get('/api/contest/leaderboard', async (req, res) => {
+    try {
+        const leaderboard = await pool.query(`
+            SELECT 
+                cl.*,
+                bu.username,
+                bu.first_name,
+                ROW_NUMBER() OVER (ORDER BY cl.points DESC, cl.last_activity DESC) as rank
+            FROM contest_leaderboard cl
+            LEFT JOIN bot_users bu ON cl.user_id = bu.telegram_id
+            ORDER BY cl.points DESC, cl.last_activity DESC
+            LIMIT 50
+        `);
+        
+        console.log(`📊 جلب ${leaderboard.rows.length} متسابق من المسابقة`);
+        
+        res.json({
+            success: true,
+            leaderboard: leaderboard.rows,
+            totalParticipants: leaderboard.rows.length,
+            lastUpdated: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('❌ خطأ في جلب المتصدرين:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 🏆 جلب ترتيب مستخدم معين - تحديث فوري
+app.get('/api/contest/user-rank/:userId', async (req, res) => {
+    try {
+        const userId = req.params.userId;
+        
+        const rankResult = await pool.query(`
+            SELECT position FROM (
+                SELECT user_id, ROW_NUMBER() OVER (ORDER BY points DESC, last_activity DESC) as position
+                FROM contest_leaderboard
+            ) ranked WHERE user_id = $1
+        `, [userId]);
+        
+        const userRank = rankResult.rows.length > 0 ? rankResult.rows[0].position : 0;
+        
+        console.log(`🏆 ترتيب المستخدم ${userId}: ${userRank}`);
+        
+        res.json({
+            success: true,
+            userId: userId,
+            rank: userRank,
+            inLeaderboard: userRank > 0
+        });
+    } catch (error) {
+        console.error('❌ خطأ في جلب الترتيب:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 🏆 جلب بيانات مسابقة مستخدم معين
+app.get('/api/contest/user/:userId', async (req, res) => {
+    try {
+        const userId = req.params.userId;
+        
+        const result = await pool.query(`
+            SELECT * FROM contest_leaderboard 
+            WHERE user_id = $1
+        `, [userId]);
+        
+        if (result.rows.length > 0) {
+            res.json({ success: true, contestData: result.rows[0] });
+        } else {
+            res.json({ success: true, contestData: null });
+        }
+    } catch (error) {
+        console.error('❌ خطأ في جلب بيانات مسابقة المستخدم:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+// 👥 endpoints نظام الإحالات
+app.post('/api/referrals/add', async (req, res) => {
+    try {
+        const { referrerId, referredId } = req.body;
+        
+        console.log(`👥 محاولة إضافة إحالة: ${referrerId} أحال ${referredId}`);
+        
+        // تحقق إذا المستخدم الجديد موجود
+        const referredUser = await getUserFromDB(referredId);
+        if (!referredUser) {
+            return res.status(404).json({ success: false, error: 'Referred user not found' });
+        }
+        
+        // تحقق إذا تمت الإحالة مسبقاً
+        const existingReferral = await pool.query(
+            'SELECT * FROM referrals WHERE referred_id = $1',
+            [referredId]
+        );
+        
+        if (existingReferral.rows.length > 0) {
+            return res.json({ success: true, message: 'User already referred', referral: existingReferral.rows[0] });
+        }
+        
+        // تسجيل الإحالة الجديدة
+        const result = await pool.query(`
+            INSERT INTO referrals (referrer_id, referred_id, status)
+            VALUES ($1, $2, 'active')
+            RETURNING *
+        `, [referrerId, referredId]);
+        
+        // تحديث عدد الإحالات في المسابقة - 15 نقطة لكل إحالة
+        await pool.query(`
+            INSERT INTO contest_leaderboard (user_id, referrals_count, points, last_activity)
+            VALUES ($1, 1, 15, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id) 
+            DO UPDATE SET 
+                referrals_count = contest_leaderboard.referrals_count + 1,
+                points = contest_leaderboard.points + 15,
+                last_activity = EXCLUDED.last_activity
+        `, [referrerId]);
+        
+        console.log(`✅ تم تسجيل الإحالة بنجاح: +15 نقطة للمستخدم ${referrerId}`);
+        
+        res.json({
+            success: true,
+            referral: result.rows[0],
+            contestPoints: 15,
+            message: 'تم تسجيل الإحالة بنجاح +15 نقطة مسابقة'
+        });
+    } catch (error) {
+        console.error('❌ خطأ في تسجيل الإحالة:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/api/referrals/user/:userId', async (req, res) => {
+    try {
+        const userId = req.params.userId;
+        
+        // جلب الإحالات
+        const referrals = await pool.query(`
+            SELECT r.*, bu.first_name, bu.username 
+            FROM referrals r
+            LEFT JOIN bot_users bu ON r.referred_id = bu.telegram_id
+            WHERE r.referrer_id = $1
+            ORDER BY r.created_at DESC
+        `, [userId]);
+        
+        // إحصائيات الإحالات
+        const stats = await pool.query(`
+            SELECT 
+                COUNT(*) as total_referrals,
+                COALESCE(SUM(referrer_earnings), 0) as total_earnings
+            FROM referrals 
+            WHERE referrer_id = $1
+        `, [userId]);
+        
+        res.json({
+            success: true,
+            referrals: referrals.rows,
+            stats: stats.rows[0]
+        });
+    } catch (error) {
+        console.error('❌ خطأ في جلب بيانات الإحالات:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
 
 // 🔧 إصلاح بيانات المسابقة والإعلانات
 app.post('/api/fix-contest-data', async (req, res) => {
@@ -1618,15 +1867,16 @@ app.post('/api/fix-contest-data', async (req, res) => {
         if (contestResult.rows.length > 0) {
             const contestData = contestResult.rows[0];
             
-            // إذا كان عدد النقاط ضعف عدد الإعلانات، نصحح البيانات
+            // ⚡ الإصلاح: إذا كان عدد النقاط أكثر من عدد الإعلانات، نصحح البيانات
             if (contestData.points > contestData.ads_watched) {
+                const correctPoints = contestData.ads_watched; // نقطة واحدة لكل إعلان
                 await pool.query(`
                     UPDATE contest_leaderboard 
-                    SET ads_watched = $1 
+                    SET points = $1 
                     WHERE user_id = $2
-                `, [dailyAdCount, userId]);
+                `, [correctPoints, userId]);
                 
-                console.log(`✅ تم تصحيح بيانات المسابقة: ${dailyAdCount} إعلان`);
+                console.log(`✅ تم تصحيح بيانات المسابقة: ${correctPoints} نقطة لـ ${contestData.ads_watched} إعلان`);
             }
         }
         
@@ -1685,221 +1935,6 @@ app.get('/api/debug-user/:userId', async (req, res) => {
     }
 });
 
-// 🏆 نظام المسابقة المحسن (نقطة واحدة لكل إعلان)
-app.post('/api/contest/update-points', async (req, res) => {
-    try {
-        const { userId, points = 0, adsWatched = 0, referralsCount = 0 } = req.body;
-        
-        console.log(`🔄 تحديث نقاط المسابقة للمستخدم: ${userId}`, { points, adsWatched, referralsCount });
-        
-        // جلب بيانات المستخدم أولاً
-        const userResult = await pool.query(
-            'SELECT * FROM bot_users WHERE telegram_id = $1',
-            [userId]
-        );
-        
-        if (userResult.rows.length === 0) {
-            return res.status(404).json({ success: false, error: 'User not found' });
-        }
-        
-        const user = userResult.rows[0];
-        
-        // التأكد من وجود جدول المسابقة
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS contest_leaderboard (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT UNIQUE NOT NULL,
-                username VARCHAR(255),
-                first_name VARCHAR(255),
-                points INTEGER DEFAULT 0,
-                ads_watched INTEGER DEFAULT 0,
-                referrals_count INTEGER DEFAULT 0,
-                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        
-        // تحديث أو إدخال بيانات المسابقة
-        const result = await pool.query(`
-            INSERT INTO contest_leaderboard 
-            (user_id, username, first_name, points, ads_watched, referrals_count, last_activity)
-            VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
-            ON CONFLICT (user_id) 
-            DO UPDATE SET 
-                points = contest_leaderboard.points + EXCLUDED.points,
-                ads_watched = contest_leaderboard.ads_watched + EXCLUDED.ads_watched,
-                referrals_count = contest_leaderboard.referrals_count + EXCLUDED.referrals_count,
-                last_activity = EXCLUDED.last_activity
-            RETURNING *
-        `, [userId, user.username || '', user.first_name || 'User', points, adsWatched, referralsCount]);
-        
-        console.log('✅ تم تحديث المسابقة بنجاح:', result.rows[0]);
-        
-        res.json({
-            success: true,
-            contestData: result.rows[0],
-            message: 'تم تحديث نقاط المسابقة بنجاح'
-        });
-    } catch (error) {
-        console.error('❌ خطأ في تحديث نقاط المسابقة:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// 🏆 جلب المتصدرين مرتبين حسب النقاط
-app.get('/api/contest/leaderboard', async (req, res) => {
-    try {
-        const leaderboard = await pool.query(`
-            SELECT 
-                cl.*,
-                bu.username,
-                bu.first_name,
-                ROW_NUMBER() OVER (ORDER BY cl.points DESC, cl.last_activity DESC) as rank
-            FROM contest_leaderboard cl
-            LEFT JOIN bot_users bu ON cl.user_id = bu.telegram_id
-            ORDER BY cl.points DESC, cl.last_activity DESC
-            LIMIT 50
-        `);
-        
-        res.json({
-            success: true,
-            leaderboard: leaderboard.rows,
-            totalParticipants: leaderboard.rows.length
-        });
-    } catch (error) {
-        console.error('❌ خطأ في جلب المتصدرين:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// 🏆 جلب ترتيب مستخدم معين
-app.get('/api/contest/user-rank/:userId', async (req, res) => {
-    try {
-        const userId = req.params.userId;
-        
-        const rankResult = await pool.query(`
-            SELECT position FROM (
-                SELECT user_id, ROW_NUMBER() OVER (ORDER BY points DESC, last_activity DESC) as position
-                FROM contest_leaderboard
-            ) ranked WHERE user_id = $1
-        `, [userId]);
-        
-        const userRank = rankResult.rows.length > 0 ? rankResult.rows[0].position : 0;
-        
-        res.json({
-            success: true,
-            userId: userId,
-            rank: userRank,
-            inLeaderboard: userRank > 0
-        });
-    } catch (error) {
-        console.error('❌ خطأ في جلب الترتيب:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-app.get('/api/contest/user/:userId', async (req, res) => {
-    try {
-        const userId = req.params.userId;
-        
-        const result = await pool.query(`
-            SELECT * FROM contest_leaderboard 
-            WHERE user_id = $1
-        `, [userId]);
-        
-        if (result.rows.length > 0) {
-            res.json({ success: true, contestData: result.rows[0] });
-        } else {
-            res.json({ success: true, contestData: null });
-        }
-    } catch (error) {
-        console.error('❌ خطأ في جلب بيانات مسابقة المستخدم:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// 👥 endpoints نظام الإحالات
-app.post('/api/referrals/add', async (req, res) => {
-    try {
-        const { referrerId, referredId } = req.body;
-        
-        // تحقق إذا المستخدم الجديد موجود
-        const referredUser = await getUserFromDB(referredId);
-        if (!referredUser) {
-            return res.status(404).json({ success: false, error: 'Referred user not found' });
-        }
-        
-        // تحقق إذا تمت الإحالة مسبقاً
-        const existingReferral = await pool.query(
-            'SELECT * FROM referrals WHERE referred_id = $1',
-            [referredId]
-        );
-        
-        if (existingReferral.rows.length > 0) {
-            return res.json({ success: true, message: 'User already referred', referral: existingReferral.rows[0] });
-        }
-        
-        // تسجيل الإحالة الجديدة
-        const result = await pool.query(`
-            INSERT INTO referrals (referrer_id, referred_id, status)
-            VALUES ($1, $2, 'active')
-            RETURNING *
-        `, [referrerId, referredId]);
-        
-        // تحديث عدد الإحالات في المسابقة
-        await pool.query(`
-            INSERT INTO contest_leaderboard (user_id, referrals_count, last_activity)
-            VALUES ($1, 1, CURRENT_TIMESTAMP)
-            ON CONFLICT (user_id) 
-            DO UPDATE SET 
-                referrals_count = contest_leaderboard.referrals_count + 1,
-                last_activity = EXCLUDED.last_activity
-        `, [referrerId]);
-        
-        res.json({
-            success: true,
-            referral: result.rows[0],
-            message: 'تم تسجيل الإحالة بنجاح'
-        });
-    } catch (error) {
-        console.error('❌ خطأ في تسجيل الإحالة:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-app.get('/api/referrals/user/:userId', async (req, res) => {
-    try {
-        const userId = req.params.userId;
-        
-        // جلب الإحالات
-        const referrals = await pool.query(`
-            SELECT r.*, bu.first_name, bu.username 
-            FROM referrals r
-            LEFT JOIN bot_users bu ON r.referred_id = bu.telegram_id
-            WHERE r.referrer_id = $1
-            ORDER BY r.created_at DESC
-        `, [userId]);
-        
-        // إحصائيات الإحالات
-        const stats = await pool.query(`
-            SELECT 
-                COUNT(*) as total_referrals,
-                COALESCE(SUM(referrer_earnings), 0) as total_earnings
-            FROM referrals 
-            WHERE referrer_id = $1
-        `, [userId]);
-        
-        res.json({
-            success: true,
-            referrals: referrals.rows,
-            stats: stats.rows[0]
-        });
-    } catch (error) {
-        console.error('❌ خطأ في جلب بيانات الإحالات:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
 // 🔍 فحص مفصل للجداول
 app.get('/api/debug-tables', async (req, res) => {
     try {
@@ -1947,7 +1982,6 @@ app.get('/api/debug-tables', async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
-
 // 🛑 إيقاف نظيف للسيرفر
 process.on('SIGINT', () => {
     console.log('\n🛑 إيقاف نظام التوكن...');
