@@ -161,7 +161,8 @@ const validateDynamicToken = (req, res, next) => {
         '/api/check-tables', '/api/setup-database', '/api/config',
         '/api/fix-all-tables', '/api/fix-withdrawals-table', 
         '/api/debug-tables', '/api/repair-database', '/api/debug-user',
-        '/api/reward-codes/validate', '/api/reward-codes/redeem'
+        '/api/reward-codes/validate', '/api/reward-codes/redeem',
+        '/api/fix-contest-data'
     ];
     
     if (publicEndpoints.includes(req.path)) {
@@ -484,7 +485,6 @@ app.get('/api/check-tables', async (req, res) => {
         });
     }
 });
-
 // 🔧 إصلاح شامل للقاعدة
 app.get('/api/repair-database', async (req, res) => {
     try {
@@ -978,7 +978,6 @@ app.post('/api/reward-codes/redeem', async (req, res) => {
         client.release();
     }
 });
-
 // 👤 جلب بيانات المستخدم من قاعدة البيانات + تسجيل تلقائي
 app.get('/api/user/:userId', async (req, res) => {
     try {
@@ -1149,7 +1148,7 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-// 📺 مشاهدة إعلان - الإصدار المعدل (نقطة واحدة فقط)
+// 📺 مشاهدة إعلان - الإصدار المصحح (نقطة واحدة فقط)
 app.post('/api/watch-ad', async (req, res) => {
     const client = await pool.connect();
     
@@ -1235,17 +1234,31 @@ app.post('/api/watch-ad', async (req, res) => {
         const updatedUser = updateResult.rows[0];
         
         if (updatedUser) {
-            // 🔥 تحديث نقاط المسابقة - نقطة واحدة فقط
+            // 🔥 تحديث نقاط المسابقة - نقطة واحدة فقط مع التحقق من التكرار
             try {
-                await client.query(`
-                    INSERT INTO contest_leaderboard (user_id, username, first_name, points, ads_watched, last_activity)
-                    VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
-                    ON CONFLICT (user_id) 
-                    DO UPDATE SET 
-                        points = contest_leaderboard.points + EXCLUDED.points,
-                        ads_watched = contest_leaderboard.ads_watched + EXCLUDED.ads_watched,
-                        last_activity = EXCLUDED.last_activity
-                `, [userId, user.username || '', user.first_name || 'User', config.contestAdPoints, 1]);
+                // التحقق أولاً من وجود المستخدم في المسابقة
+                const existingContest = await client.query(
+                    'SELECT * FROM contest_leaderboard WHERE user_id = $1',
+                    [userId]
+                );
+
+                if (existingContest.rows.length > 0) {
+                    // تحديث النقاط بنقطة واحدة فقط
+                    await client.query(`
+                        UPDATE contest_leaderboard SET 
+                            points = points + $1,
+                            ads_watched = ads_watched + $2,
+                            last_activity = CURRENT_TIMESTAMP
+                        WHERE user_id = $3
+                    `, [config.contestAdPoints, 1, userId]);
+                } else {
+                    // إدخال جديد بنقطة واحدة فقط
+                    await client.query(`
+                        INSERT INTO contest_leaderboard 
+                        (user_id, username, first_name, points, ads_watched, last_activity)
+                        VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+                    `, [userId, user.username || '', user.first_name || 'User', config.contestAdPoints, 1]);
+                }
                 
                 console.log('✅ تمت مشاهدة الإعلان بنجاح + نقطة مسابقة واحدة');
             } catch (contestError) {
@@ -1368,7 +1381,6 @@ app.post('/api/move-to-balance', async (req, res) => {
         });
     }
 });
-
 // 💳 طلب سحب - الإصدار المحسن والمصلح
 app.post('/api/withdraw', async (req, res) => {
     const client = await pool.connect();
@@ -1497,7 +1509,7 @@ app.post('/api/withdraw', async (req, res) => {
     }
 });
 
-// 📋 الحصول على تاريخ السحوبات - تم الإصلاح
+// 📋 الحصول على تاريخ السحوبات - الإصدار المصحح
 app.get('/api/withdrawals/:userId', async (req, res) => {
     try {
         const userId = req.params.userId;
@@ -1515,7 +1527,7 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
 
         console.log('✅ تم التحقق بنجاح - متابعة الطلب');
         
-        // 🔥 الإصلاح: استخدام تنسيق التاريخ بشكل صحيح
+        // 🔥 الإصلاح الكامل: استخدام تنسيق التاريخ بشكل صحيح
         const withdrawals = await pool.query(
             `SELECT 
                 id,
@@ -1525,7 +1537,7 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
                 status,
                 method,
                 memo,
-                TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS') as created_at
+                created_at
              FROM withdrawals 
              WHERE user_id = $1 
              ORDER BY created_at DESC 
@@ -1535,17 +1547,37 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
 
         console.log(`📊 عدد السحوبات: ${withdrawals.rows.length}`);
         
-        res.json({
-            success: true,
-            withdrawals: withdrawals.rows.map(w => ({
+        // معالجة التاريخ بشكل صحيح
+        const processedWithdrawals = withdrawals.rows.map(w => {
+            let createdAt;
+            
+            try {
+                if (w.created_at instanceof Date) {
+                    createdAt = w.created_at.toISOString();
+                } else if (typeof w.created_at === 'string') {
+                    createdAt = new Date(w.created_at).toISOString();
+                } else {
+                    createdAt = new Date().toISOString();
+                }
+            } catch (error) {
+                console.log('⚠️  خطأ في معالجة التاريخ:', error);
+                createdAt = new Date().toISOString();
+            }
+            
+            return {
                 id: w.id,
                 amount: parseFloat(w.amount),
                 walletAddress: w.wallet_address,
                 status: w.status,
                 method: w.method,
-                memo: w.memo,
-                createdAt: w.created_at // ⚡ الآن سيتم إرجاعه بشكل صحيح
-            }))
+                memo: w.memo || '',
+                createdat: createdAt // ⚡ استخدام نفس الاسم الموجود في Frontend
+            };
+        });
+        
+        res.json({
+            success: true,
+            withdrawals: processedWithdrawals
         });
 
     } catch (error) {
@@ -1554,6 +1586,102 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
             success: false,
             error: 'Failed to get withdrawal history' 
         });
+    }
+});
+
+// 🔧 إصلاح بيانات المسابقة والإعلانات
+app.post('/api/fix-contest-data', async (req, res) => {
+    try {
+        const { userId } = req.body;
+        
+        console.log(`🔧 إصلاح بيانات المسابقة للمستخدم: ${userId}`);
+        
+        // جلب بيانات المستخدم
+        const userResult = await pool.query(
+            'SELECT * FROM bot_users WHERE telegram_id = $1',
+            [userId]
+        );
+        
+        if (userResult.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'User not found' });
+        }
+        
+        const user = userResult.rows[0];
+        const dailyAdCount = user.daily_ad_count || 0;
+        
+        // تصحيح بيانات المسابقة
+        const contestResult = await pool.query(
+            'SELECT * FROM contest_leaderboard WHERE user_id = $1',
+            [userId]
+        );
+        
+        if (contestResult.rows.length > 0) {
+            const contestData = contestResult.rows[0];
+            
+            // إذا كان عدد النقاط ضعف عدد الإعلانات، نصحح البيانات
+            if (contestData.points > contestData.ads_watched) {
+                await pool.query(`
+                    UPDATE contest_leaderboard 
+                    SET ads_watched = $1 
+                    WHERE user_id = $2
+                `, [dailyAdCount, userId]);
+                
+                console.log(`✅ تم تصحيح بيانات المسابقة: ${dailyAdCount} إعلان`);
+            }
+        }
+        
+        res.json({
+            success: true,
+            message: 'تم تصحيح بيانات المسابقة بنجاح',
+            dailyAdCount: dailyAdCount,
+            contestData: contestResult.rows[0] || null
+        });
+        
+    } catch (error) {
+        console.error('❌ خطأ في إصلاح بيانات المسابقة:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 🔍 فحص بيانات مستخدم معين
+app.get('/api/debug-user/:userId', async (req, res) => {
+    try {
+        const userId = req.params.userId;
+        
+        // بيانات المستخدم
+        const userResult = await pool.query(
+            'SELECT * FROM bot_users WHERE telegram_id = $1',
+            [userId]
+        );
+        
+        // بيانات المسابقة
+        const contestResult = await pool.query(
+            'SELECT * FROM contest_leaderboard WHERE user_id = $1',
+            [userId]
+        );
+        
+        // تاريخ السحوبات
+        const withdrawalsResult = await pool.query(
+            'SELECT * FROM withdrawals WHERE user_id = $1 ORDER BY created_at DESC LIMIT 5',
+            [userId]
+        );
+        
+        res.json({
+            success: true,
+            user: userResult.rows[0] || null,
+            contest: contestResult.rows[0] || null,
+            withdrawals: withdrawalsResult.rows,
+            analysis: {
+                dailyAdCount: userResult.rows[0]?.daily_ad_count || 0,
+                contestPoints: contestResult.rows[0]?.points || 0,
+                contestAds: contestResult.rows[0]?.ads_watched || 0,
+                pointsPerAd: contestResult.rows[0]?.points / contestResult.rows[0]?.ads_watched || 0
+            }
+        });
+        
+    } catch (error) {
+        console.error('❌ خطأ في فحص بيانات المستخدم:', error);
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
@@ -1842,7 +1970,7 @@ app.listen(PORT, HOST, () => {
     console.log(`📊 Daily ads: ${config.dailyAdLimit} ads`);
     console.log(`💸 Min withdrawal: ${config.minWithdrawal} TON`);
     console.log(`👥 Referral bonus: ${config.referralBonus} TON`);
-    console.log(`🏆 Contest points per ad: ${config.contestAdPoints} (نقطة واحدة فقط)`); // ⚡ تحديث
+    console.log(`🏆 Contest points per ad: ${config.contestAdPoints} (نقطة واحدة فقط)`);
     console.log(`🔐 Telegram verification: ENABLED`);
     console.log(`🔄 Dynamic token system: ACTIVE (10 seconds)`);
     
