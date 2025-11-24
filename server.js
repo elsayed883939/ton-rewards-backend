@@ -248,7 +248,265 @@ function validateTelegramInitData(initData) {
         
         // إنشاء المفتاح السري
         const secretKey = crypto
-        // 🔥 إضافة endpoint لإعداد الأكواد المميزة
+            .createHmac('sha256', 'WebAppData')
+            .update(BOT_TOKEN)
+            .digest();
+        
+        // حساب الهاش المتوقع
+        const expectedHash = crypto
+            .createHmac('sha256', secretKey)
+            .update(dataCheckString)
+            .digest('hex');
+        
+        console.log('🔑 الهاش المتوقع:', expectedHash);
+        console.log('🔑 الهاش المستلم:', hash);
+
+        const isValid = expectedHash === hash;
+        console.log('✅ نتيجة التحقق:', isValid ? 'صالح' : 'غير صالح');
+        
+        return isValid;
+    } catch (error) {
+        console.error('❌ خطأ في التحقق من التوقيع:', error);
+        return false;
+    }
+}
+
+// 🔧 دالة لتحليل بيانات تليجرام
+function parseTelegramUser(initData) {
+    try {
+        const decodedInitData = decodeURIComponent(initData);
+        const parsedData = querystring.parse(decodedInitData);
+        
+        if (parsedData.user) {
+            return JSON.parse(parsedData.user);
+        }
+        return null;
+    } catch (error) {
+        console.error('❌ خطأ في تحليل بيانات المستخدم:', error);
+        return null;
+    }
+}
+
+// 👤 دوال مساعدة للتعامل مع قاعدة البيانات
+async function getUserFromDB(userId) {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM bot_users WHERE telegram_id = $1',
+            [userId]
+        );
+        return result.rows[0] || null;
+    } catch (error) {
+        console.error('❌ خطأ في جلب المستخدم:', error);
+        return null;
+    }
+}
+
+async function createUserInDB(userData) {
+    try {
+        const result = await pool.query(
+            `INSERT INTO bot_users (telegram_id, username, first_name, balance, earning_wallet, total_earned) 
+             VALUES ($1, $2, $3, $4, $5, $6) 
+             RETURNING *`,
+            [
+                userData.telegram_id,
+                userData.username,
+                userData.first_name,
+                0, // balance
+                0, // earning_wallet
+                0  // total_earned
+            ]
+        );
+        return result.rows[0];
+    } catch (error) {
+        console.error('❌ خطأ في إنشاء المستخدم:', error);
+        return null;
+    }
+}
+
+// 📺 مشاهدة إعلان - الإصدار المصحح (نقطة واحدة فقط) - مع منع التكرار
+app.post('/api/watch-ad', async (req, res) => {
+    const client = await pool.connect();
+    
+    try {
+        const { initData } = req.body;
+
+        console.log('📥 طلب مشاهدة إعلان');
+
+        if (!validateTelegramInitData(initData)) {
+            console.log('❌ فشل التحقق - رفض مشاهدة الإعلان');
+            return res.status(401).json({ 
+                success: false,
+                error: 'Invalid security signature' 
+            });
+        }
+
+        console.log('✅ تم التحقق بنجاح - متابعة مشاهدة الإعلان');
+        const telegramUser = parseTelegramUser(initData);
+        
+        if (!telegramUser?.id) {
+            console.log('❌ بيانات المستخدم غير صالحة');
+            return res.status(400).json({ 
+                success: false,
+                error: 'Invalid user data' 
+            });
+        }
+
+        const userId = telegramUser.id.toString();
+        console.log(`👤 معالجة مشاهدة إعلان للمستخدم: ${userId}`);
+        
+        await client.query('BEGIN');
+
+        // 🔥 جلب المستخدم مع قفل الصف لمنع التكرار
+        const userResult = await client.query(
+            'SELECT * FROM bot_users WHERE telegram_id = $1 FOR UPDATE',
+            [userId]
+        );
+        
+        if (userResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            console.log('❌ المستخدم غير موجود - يجب التسجيل أولاً');
+            return res.status(404).json({ 
+                success: false,
+                error: 'User not found - Please register first' 
+            });
+        }
+
+        const user = userResult.rows[0];
+
+        // 🔥 التحقق من الحد اليومي للإعلانات
+        const today = new Date().toDateString();
+        const lastAdDate = user.last_ad_date ? new Date(user.last_ad_date).toDateString() : null;
+        
+        let dailyAdCount = user.daily_ad_count || 0;
+        if (lastAdDate !== today) {
+            dailyAdCount = 0;
+        }
+
+        if (dailyAdCount >= config.dailyAdLimit) {
+            await client.query('ROLLBACK');
+            console.log('❌ وصل للحد اليومي للإعلانات');
+            return res.status(400).json({ 
+                success: false,
+                error: 'Daily ad limit reached' 
+            });
+        }
+
+        // 🔥 التحقق من التكرار - إذا تمت مشاهدة إعلان في آخر 30 ثانية
+        const lastAdTime = user.last_ad_timestamp ? new Date(user.last_ad_timestamp).getTime() : 0;
+        const currentTime = Date.now();
+        const timeSinceLastAd = currentTime - lastAdTime;
+        
+        if (timeSinceLastAd < 30000) { // 30 ثانية
+            await client.query('ROLLBACK');
+            console.log('❌ طلب مكرر - تمت مشاهدة إعلان مؤخراً');
+            return res.status(400).json({ 
+                success: false,
+                error: 'Please wait before watching another ad' 
+            });
+        }
+
+        // تحديث البيانات في قاعدة البيانات
+        const adReward = config.adValue;
+        console.log(`💰 مكافأة الإعلان: ${adReward} TON`);
+        
+        const updateResult = await client.query(
+            `UPDATE bot_users SET 
+                earning_wallet = COALESCE(earning_wallet, 0) + $1,
+                total_earned = COALESCE(total_earned, 0) + $1,
+                daily_ad_count = $2,
+                last_ad_date = CURRENT_DATE,
+                last_ad_timestamp = CURRENT_TIMESTAMP
+             WHERE telegram_id = $3 
+             RETURNING *`,
+            [adReward, dailyAdCount + 1, userId]
+        );
+
+        const updatedUser = updateResult.rows[0];
+        
+        if (updatedUser) {
+            // 🔥 تحديث نقاط المسابقة - نقطة واحدة فقط مع التحقق من عدم التكرار
+            try {
+                // التحقق أولاً من وجود المستخدم في المسابقة
+                const existingContest = await client.query(
+                    'SELECT * FROM contest_leaderboard WHERE user_id = $1',
+                    [userId]
+                );
+
+                if (existingContest.rows.length > 0) {
+                    // ⚡ نقطة واحدة فقط مع التحقق من التكرار
+                    const currentPoints = existingContest.rows[0].points;
+                    const currentAds = existingContest.rows[0].ads_watched;
+                    
+                    // 🔥 التأكد من أن النقاط تساوي عدد الإعلانات (نقطة واحدة لكل إعلان)
+                    if (currentPoints > currentAds) {
+                        // إذا كانت النقاط أكثر من الإعلانات، نصحح البيانات
+                        await client.query(`
+                            UPDATE contest_leaderboard SET 
+                                points = ads_watched,
+                                last_activity = CURRENT_TIMESTAMP
+                            WHERE user_id = $1
+                        `, [userId]);
+                    } else {
+                        // ⚡ نقطة واحدة فقط
+                        await client.query(`
+                            UPDATE contest_leaderboard SET 
+                                points = points + 1,
+                                ads_watched = ads_watched + 1,
+                                last_activity = CURRENT_TIMESTAMP
+                            WHERE user_id = $1
+                        `, [userId]);
+                    }
+                    
+                    console.log(`✅ تم تحديث المسابقة: +1 نقطة للمستخدم ${userId}`);
+                } else {
+                    // ⚡ نقطة واحدة فقط
+                    await client.query(`
+                        INSERT INTO contest_leaderboard 
+                        (user_id, username, first_name, points, ads_watched, last_activity)
+                        VALUES ($1, $2, $3, 1, 1, CURRENT_TIMESTAMP)
+                    `, [userId, user.username || '', user.first_name || 'User']);
+                    
+                    console.log(`✅ تم إدخال جديد في المسابقة: +1 نقطة للمستخدم ${userId}`);
+                }
+                
+                console.log('✅ تمت مشاهدة الإعلان بنجاح + نقطة مسابقة واحدة');
+            } catch (contestError) {
+                console.log('⚠️  خطأ في تحديث المسابقة:', contestError.message);
+                // لا نوقف العملية إذا فشل تحديث المسابقة
+            }
+
+            await client.query('COMMIT');
+            
+            res.json({
+                success: true,
+                amount: adReward,
+                earningWallet: parseFloat(updatedUser.earning_wallet || 0),
+                dailyRemaining: config.dailyAdLimit - (dailyAdCount + 1),
+                totalEarned: parseFloat(updatedUser.total_earned || 0),
+                contestPoints: 1 // ⚡ نقطة واحدة فقط
+            });
+        } else {
+            await client.query('ROLLBACK');
+            console.log('❌ فشل في معالجة الإعلان');
+            res.status(500).json({ 
+                success: false,
+                error: 'Failed to process ad' 
+            });
+        }
+
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('❌ خطأ في مشاهدة الإعلان:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: 'Failed to process ad: ' + error.message 
+        });
+    } finally {
+        client.release();
+    }
+});
+
+// 🔥 إضافة endpoint لإعداد الأكواد المميزة
 app.get('/api/reward-codes/setup', async (req, res) => {
     try {
         console.log('🔧 بدء إعداد الأكواد المميزة...');
@@ -688,159 +946,6 @@ app.post('/api/register', async (req, res) => {
             success: false,
             error: 'Registration failed: ' + error.message 
         });
-    }
-});
-
-// 📺 مشاهدة إعلان - الإصدار المصحح (نقطة واحدة فقط) - بدون تكرار
-app.post('/api/watch-ad', async (req, res) => {
-    const client = await pool.connect();
-    
-    try {
-        const { initData } = req.body;
-
-        console.log('📥 طلب مشاهدة إعلان');
-
-        if (!validateTelegramInitData(initData)) {
-            console.log('❌ فشل التحقق - رفض مشاهدة الإعلان');
-            return res.status(401).json({ 
-                success: false,
-                error: 'Invalid security signature' 
-            });
-        }
-
-        console.log('✅ تم التحقق بنجاح - متابعة مشاهدة الإعلان');
-        const telegramUser = parseTelegramUser(initData);
-        
-        if (!telegramUser?.id) {
-            console.log('❌ بيانات المستخدم غير صالحة');
-            return res.status(400).json({ 
-                success: false,
-                error: 'Invalid user data' 
-            });
-        }
-
-        const userId = telegramUser.id.toString();
-        console.log(`👤 معالجة مشاهدة إعلان للمستخدم: ${userId}`);
-        
-        await client.query('BEGIN');
-
-        // جلب المستخدم مع قفل الصف لمنع التنافس
-        const userResult = await client.query(
-            'SELECT * FROM bot_users WHERE telegram_id = $1 FOR UPDATE',
-            [userId]
-        );
-        
-        if (userResult.rows.length === 0) {
-            await client.query('ROLLBACK');
-            console.log('❌ المستخدم غير موجود - يجب التسجيل أولاً');
-            return res.status(404).json({ 
-                success: false,
-                error: 'User not found - Please register first' 
-            });
-        }
-
-        const user = userResult.rows[0];
-
-        // 🔥 التحقق من الحد اليومي للإعلانات
-        const today = new Date().toDateString();
-        const lastAdDate = user.last_ad_date ? new Date(user.last_ad_date).toDateString() : null;
-        
-        let dailyAdCount = user.daily_ad_count || 0;
-        if (lastAdDate !== today) {
-            dailyAdCount = 0;
-        }
-
-        if (dailyAdCount >= config.dailyAdLimit) {
-            await client.query('ROLLBACK');
-            console.log('❌ وصل للحد اليومي للإعلانات');
-            return res.status(400).json({ 
-                success: false,
-                error: 'Daily ad limit reached' 
-            });
-        }
-
-        // تحديث البيانات في قاعدة البيانات
-        const adReward = config.adValue;
-        console.log(`💰 مكافأة الإعلان: ${adReward} TON`);
-        
-        const updateResult = await client.query(
-            `UPDATE bot_users SET 
-                earning_wallet = COALESCE(earning_wallet, 0) + $1,
-                total_earned = COALESCE(total_earned, 0) + $1,
-                daily_ad_count = $2,
-                last_ad_date = CURRENT_DATE
-             WHERE telegram_id = $3 
-             RETURNING *`,
-            [adReward, dailyAdCount + 1, userId]
-        );
-
-        const updatedUser = updateResult.rows[0];
-        
-        if (updatedUser) {
-            // 🔥 تحديث نقاط المسابقة - نقطة واحدة فقط مع التحقق من التكرار
-            try {
-                // التحقق أولاً من وجود المستخدم في المسابقة
-                const existingContest = await client.query(
-                    'SELECT * FROM contest_leaderboard WHERE user_id = $1',
-                    [userId]
-                );
-
-                if (existingContest.rows.length > 0) {
-                    // ⚡ نقطة واحدة فقط
-                    await client.query(`
-                        UPDATE contest_leaderboard SET 
-                            points = points + 1,
-                            ads_watched = ads_watched + 1,
-                            last_activity = CURRENT_TIMESTAMP
-                        WHERE user_id = $1
-                    `, [userId]);
-                    
-                    console.log(`✅ تم تحديث المسابقة: +1 نقطة للمستخدم ${userId}`);
-                } else {
-                    // ⚡ نقطة واحدة فقط
-                    await client.query(`
-                        INSERT INTO contest_leaderboard 
-                        (user_id, username, first_name, points, ads_watched, last_activity)
-                        VALUES ($1, $2, $3, 1, 1, CURRENT_TIMESTAMP)
-                    `, [userId, user.username || '', user.first_name || 'User']);
-                    
-                    console.log(`✅ تم إدخال جديد في المسابقة: +1 نقطة للمستخدم ${userId}`);
-                }
-                
-                console.log('✅ تمت مشاهدة الإعلان بنجاح + نقطة مسابقة واحدة');
-            } catch (contestError) {
-                console.log('⚠️  خطأ في تحديث المسابقة:', contestError.message);
-                // لا نوقف العملية إذا فشل تحديث المسابقة
-            }
-
-            await client.query('COMMIT');
-            
-            res.json({
-                success: true,
-                amount: adReward,
-                earningWallet: parseFloat(updatedUser.earning_wallet || 0),
-                dailyRemaining: config.dailyAdLimit - (dailyAdCount + 1),
-                totalEarned: parseFloat(updatedUser.total_earned || 0),
-                contestPoints: 1 // ⚡ نقطة واحدة فقط
-            });
-        } else {
-            await client.query('ROLLBACK');
-            console.log('❌ فشل في معالجة الإعلان');
-            res.status(500).json({ 
-                success: false,
-                error: 'Failed to process ad' 
-            });
-        }
-
-    } catch (error) {
-        await client.query('ROLLBACK');
-        console.error('❌ خطأ في مشاهدة الإعلان:', error.message);
-        res.status(500).json({ 
-            success: false,
-            error: 'Failed to process ad: ' + error.message 
-        });
-    } finally {
-        client.release();
     }
 });
 // 💰 تحويل المحفظة إلى الرصيد
