@@ -24,7 +24,7 @@ class DatabaseManager {
     async init() {
         try {
             this.pool = new Pool({
-                connectionString: "postgresql://postgres:EBEXkZAIxdoDqsUNjaYJNcjLdDvuHtSU@magvent.proxy.rlwy.net:12181/railway",
+                connectionString: "postgresql://postgres:EBEXkZAIxdoDqsUNjaYJNcjLdDvuHtSU@maglev.proxy.rlwy.net:12181/railway",
                 ssl: { rejectUnauthorized: false },
                 connectionTimeoutMillis: 10000,
                 idleTimeoutMillis: 30000,
