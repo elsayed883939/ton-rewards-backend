@@ -123,7 +123,7 @@ const config = {
     contestReferralPoints: 15 // نقاط المسابقة لكل إحالة
 };
 
-// 🔧 نظام التوكن الديناميكي - الإصدار المحسن
+// 🔧 نظام التوكن الديناميكي - الإصدار المحسن والمعدل
 class DynamicTokenSystem {
     constructor() {
         this.tokens = new Map();
@@ -132,9 +132,10 @@ class DynamicTokenSystem {
         this.tokenCounter = 0;
         this.intervalId = null;
         
+        // 🔥 التعديل: تغيير من 10 إلى 9 ثواني لتتوافق مع البوت
         this.config = {
-            tokenRefreshInterval: 10000,
-            tokenValidityWindow: 30000,
+            tokenRefreshInterval: 9000,        // 🔥 كان 10000 - أصبح 9000
+            tokenValidityWindow: 25000,        // 🔥 كان 30000 - أصبح 25000
             maxTokens: 20,
             secretKey: process.env.TOKEN_SECRET || 'ton-rewards-dynamic-token-secret-2024'
         };
@@ -170,6 +171,7 @@ class DynamicTokenSystem {
 
     start() {
         console.log('🚀 بدء نظام التوكن الديناميكي المحسن...');
+        console.log(`🔄 معدل التحديث: ${this.config.tokenRefreshInterval/1000} ثواني`);
         this.updateToken();
         
         this.intervalId = setInterval(() => {
@@ -236,7 +238,8 @@ class DynamicTokenSystem {
         return {
             currentToken: this.currentToken ? this.currentToken.substring(0, 20) + '...' : null,
             activeTokens: this.tokens.size,
-            totalGenerated: this.tokenCounter
+            totalGenerated: this.tokenCounter,
+            refreshInterval: this.config.tokenRefreshInterval
         };
     }
 
@@ -277,7 +280,8 @@ const validateDynamicToken = (req, res, next) => {
         '/api/contest/user-rank/:userId',
         '/api/contest/user/:userId',
         // 🔥 إضافة endpoint التحقق من initData
-        '/api/validate-initdata'
+        '/api/validate-initdata',
+        '/api/stats'
     ];
     
     // التحقق إذا كان الـ endpoint عام
@@ -608,13 +612,24 @@ app.post('/api/watch-ad', async (req, res) => {
 
             await client.query('COMMIT');
             
+            // 🔥 التحديث الفوري للمسابقة
+            setTimeout(async () => {
+                try {
+                    await updateContestLeaderboard();
+                    console.log('⚡ تم التحديث الفوري للمسابقة');
+                } catch (error) {
+                    console.log('⚠️  خطأ في التحديث الفوري:', error.message);
+                }
+            }, 500);
+            
             res.json({
                 success: true,
                 amount: adReward,
                 earningWallet: parseFloat(updatedUser.earning_wallet || 0),
                 dailyRemaining: config.dailyAdLimit - (dailyAdCount + 1),
                 totalEarned: parseFloat(updatedUser.total_earned || 0),
-                contestPoints: 1 // ⚡ نقطة واحدة فقط
+                contestPoints: 1, // ⚡ نقطة واحدة فقط
+                userRRBalance: Math.floor((parseFloat(updatedUser.earning_wallet || 0) * 10000000)) // 🔥 إضافة RR balance
             });
         } else {
             await client.query('ROLLBACK');
@@ -636,7 +651,6 @@ app.post('/api/watch-ad', async (req, res) => {
         client.release();
     }
 });
-
 // 👤 جلب بيانات المستخدم من قاعدة البيانات + تسجيل تلقائي
 app.get('/api/user/:userId', async (req, res) => {
     try {
@@ -692,6 +706,10 @@ app.get('/api/user/:userId', async (req, res) => {
 
         if (user) {
             console.log('✅ تم العثور على المستخدم');
+            
+            // 🔥 حساب RR balance من earning wallet
+            const userRRBalance = Math.floor((parseFloat(user.earning_wallet || 0) * 10000000));
+            
             res.json({ 
                 success: true, 
                 user: {
@@ -701,7 +719,8 @@ app.get('/api/user/:userId', async (req, res) => {
                     balance: parseFloat(user.balance || 0),
                     earningWallet: parseFloat(user.earning_wallet || 0),
                     dailyAdCount: user.daily_ad_count || 0,
-                    totalEarned: parseFloat(user.total_earned || 0)
+                    totalEarned: parseFloat(user.total_earned || 0),
+                    userRRBalance: userRRBalance // 🔥 إضافة RR balance
                 },
                 isNewUser: isNewUser,
                 welcomeMessage: isNewUser ? `🎉 أهلاً وسهلاً ${user.first_name}!` : `مرحباً بعودتك ${user.first_name}!`
@@ -757,6 +776,10 @@ app.post('/api/register', async (req, res) => {
         
         if (user) {
             console.log('✅ المستخدم موجود بالفعل');
+            
+            // 🔥 حساب RR balance من earning wallet
+            const userRRBalance = Math.floor((parseFloat(user.earning_wallet || 0) * 10000000));
+            
             return res.json({ 
                 success: true, 
                 user: {
@@ -766,7 +789,8 @@ app.post('/api/register', async (req, res) => {
                     balance: parseFloat(user.balance || 0),
                     earningWallet: parseFloat(user.earning_wallet || 0),
                     dailyAdCount: user.daily_ad_count || 0,
-                    totalEarned: parseFloat(user.total_earned || 0)
+                    totalEarned: parseFloat(user.total_earned || 0),
+                    userRRBalance: userRRBalance // 🔥 إضافة RR balance
                 },
                 message: `مرحباً بعودتك ${user.first_name}!`
             });
@@ -793,7 +817,8 @@ app.post('/api/register', async (req, res) => {
                     balance: parseFloat(user.balance || 0),
                     earningWallet: parseFloat(user.earning_wallet || 0),
                     dailyAdCount: user.daily_ad_count || 0,
-                    totalEarned: parseFloat(user.total_earned || 0)
+                    totalEarned: parseFloat(user.total_earned || 0),
+                    userRRBalance: 0 // 🔥 إضافة RR balance
                 },
                 message: `🎉 أهلاً وسهلاً ${user.first_name}!`
             });
@@ -813,6 +838,7 @@ app.post('/api/register', async (req, res) => {
         });
     }
 });
+
 // 💰 تحويل المحفظة إلى الرصيد
 app.post('/api/move-to-balance', async (req, res) => {
     try {
@@ -993,13 +1019,13 @@ app.post('/api/withdraw', async (req, res) => {
             [withdrawAmount, userId]
         );
 
-        // تسجيل طلب السحب
+        // 🔥 الإصلاح: تسجيل طلب السحب مع memo بشكل صحيح
         const withdrawalResult = await client.query(
             `INSERT INTO withdrawals 
              (user_id, amount, wallet_address, status, method, memo) 
              VALUES ($1, $2, $3, $4, $5, $6) 
              RETURNING *`,
-            [userId, withdrawAmount, walletAddress, 'pending', method, memo]
+            [userId, withdrawAmount, walletAddress, 'pending', method, memo || ''] // 🔥 إصلاح memo
         );
 
         await client.query('COMMIT');
@@ -1107,6 +1133,29 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
     }
 });
 
+// 🔥 دالة مساعدة لتحديث قائمة المتصدرين
+async function updateContestLeaderboard() {
+    try {
+        const leaderboard = await pool.query(`
+            SELECT 
+                cl.*,
+                bu.username,
+                bu.first_name,
+                ROW_NUMBER() OVER (ORDER BY cl.points DESC, cl.last_activity DESC) as rank
+            FROM contest_leaderboard cl
+            LEFT JOIN bot_users bu ON cl.user_id = bu.telegram_id
+            ORDER BY cl.points DESC, cl.last_activity DESC
+            LIMIT 50
+        `);
+        
+        console.log(`⚡ تم تحديث قائمة المتصدرين: ${leaderboard.rows.length} متسابق`);
+        return leaderboard.rows;
+    } catch (error) {
+        console.error('❌ خطأ في تحديث المتصدرين:', error);
+        return [];
+    }
+}
+
 // 🏆 نظام المسابقة المحسن (نقطة واحدة فقط لكل إعلان)
 app.post('/api/contest/update-points', async (req, res) => {
     try {
@@ -1161,6 +1210,15 @@ app.post('/api/contest/update-points', async (req, res) => {
         
         console.log('✅ تم تحديث المسابقة بنجاح:', result.rows[0]);
         
+        // 🔥 التحديث الفوري للمتصدرين
+        setTimeout(async () => {
+            try {
+                await updateContestLeaderboard();
+            } catch (error) {
+                console.log('⚠️  خطأ في التحديث الفوري:', error.message);
+            }
+        }, 300);
+        
         res.json({
             success: true,
             contestData: result.rows[0],
@@ -1175,24 +1233,14 @@ app.post('/api/contest/update-points', async (req, res) => {
 // 🏆 جلب المتصدرين مرتبين حسب النقاط - تحديث فوري
 app.get('/api/contest/leaderboard', async (req, res) => {
     try {
-        const leaderboard = await pool.query(`
-            SELECT 
-                cl.*,
-                bu.username,
-                bu.first_name,
-                ROW_NUMBER() OVER (ORDER BY cl.points DESC, cl.last_activity DESC) as rank
-            FROM contest_leaderboard cl
-            LEFT JOIN bot_users bu ON cl.user_id = bu.telegram_id
-            ORDER BY cl.points DESC, cl.last_activity DESC
-            LIMIT 50
-        `);
+        const leaderboard = await updateContestLeaderboard();
         
-        console.log(`📊 جلب ${leaderboard.rows.length} متسابق من المسابقة`);
+        console.log(`📊 جلب ${leaderboard.length} متسابق من المسابقة`);
         
         res.json({
             success: true,
-            leaderboard: leaderboard.rows,
-            totalParticipants: leaderboard.rows.length,
+            leaderboard: leaderboard,
+            totalParticipants: leaderboard.length,
             lastUpdated: new Date().toISOString()
         });
     } catch (error) {
@@ -1249,7 +1297,6 @@ app.get('/api/contest/user/:userId', async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
-
 // 👥 endpoints نظام الإحالات
 app.post('/api/referrals/add', async (req, res) => {
     try {
@@ -2204,7 +2251,7 @@ app.listen(PORT, HOST, () => {
     console.log(`👥 Referral bonus: ${config.referralBonus} TON`);
     console.log(`🏆 Contest points per ad: ${config.contestAdPoints} (نقطة واحدة فقط)`);
     console.log(`🔐 Telegram verification: ENABLED`);
-    console.log(`🔄 Dynamic token system: ACTIVE (10 seconds)`);
+    console.log(`🔄 Dynamic token system: ACTIVE (9 seconds)`); // 🔥 تم التعديل
     console.log(`🗄️ Database manager: ACTIVE`);
     
     // فحص الاتصال بقاعدة البيانات عند البدء
