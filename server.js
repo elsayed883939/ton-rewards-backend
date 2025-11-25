@@ -5,7 +5,14 @@ const { Pool } = require('pg');
 const querystring = require('querystring');
 
 const app = express();
-app.use(cors());
+
+// 🔧 إعداد CORS محسن
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    allowedHeaders: ['Content-Type', 'X-Dynamic-Token', 'Authorization']
+}));
+
 app.use(express.json());
 
 // 🎯 البوت توكن
@@ -247,16 +254,41 @@ tokenSystem.start();
 // 🔧 middleware محسن للتحقق من التوكن
 const validateDynamicToken = (req, res, next) => {
     const publicEndpoints = [
-        '/', '/api/token/current', '/api/token/stats', 
-        '/api/check-tables', '/api/setup-database', '/api/config',
-        '/api/fix-all-tables', '/api/fix-withdrawals-table', 
-        '/api/debug-tables', '/api/repair-database', '/api/debug-user',
-        '/api/reward-codes/validate', '/api/reward-codes/redeem',
-        '/api/fix-contest-data', '/api/fix-all-contest-data',
-        '/api/database/status', '/api/health', '/api/test-connection'
+        '/', 
+        '/api/token/current', 
+        '/api/token/stats', 
+        '/api/check-tables', 
+        '/api/setup-database', 
+        '/api/config',
+        '/api/fix-all-tables', 
+        '/api/fix-withdrawals-table', 
+        '/api/debug-tables', 
+        '/api/repair-database', 
+        '/api/debug-user',
+        '/api/reward-codes/validate', 
+        '/api/reward-codes/redeem',
+        '/api/fix-contest-data', 
+        '/api/fix-all-contest-data',
+        '/api/database/status', 
+        '/api/health', 
+        '/api/test-connection',
+        // 🔥 إضافة endpoints المسابقة
+        '/api/contest/leaderboard',
+        '/api/contest/user-rank/:userId',
+        '/api/contest/user/:userId'
     ];
     
-    if (publicEndpoints.includes(req.path)) {
+    // التحقق إذا كان الـ endpoint عام
+    const isPublicEndpoint = publicEndpoints.some(endpoint => {
+        if (endpoint.includes(':')) {
+            // معالجة الـ endpoints التي تحتوي على parameters
+            const basePath = endpoint.split('/:')[0];
+            return req.path.startsWith(basePath);
+        }
+        return req.path === endpoint;
+    });
+    
+    if (isPublicEndpoint) {
         return next();
     }
 
@@ -412,7 +444,6 @@ async function createUserInDB(userData) {
         return null;
     }
 }
-
 // 🔍 فحص حالة الاتصال بقاعدة البيانات
 app.get('/api/database/status', async (req, res) => {
     try {
@@ -708,6 +739,7 @@ app.get('/api/repair-database', async (req, res) => {
         });
     }
 });
+
 // 📺 مشاهدة إعلان - الإصدار المصحح (نقطة واحدة فقط) - مع منع التكرار
 app.post('/api/watch-ad', async (req, res) => {
     const client = await pool.connect();
@@ -1060,7 +1092,6 @@ app.post('/api/register', async (req, res) => {
         });
     }
 });
-
 // 💰 تحويل المحفظة إلى الرصيد
 app.post('/api/move-to-balance', async (req, res) => {
     try {
@@ -1354,6 +1385,7 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
         });
     }
 });
+
 // 🏆 نظام المسابقة المحسن (نقطة واحدة فقط لكل إعلان)
 app.post('/api/contest/update-points', async (req, res) => {
     try {
@@ -1584,7 +1616,6 @@ app.get('/api/referrals/user/:userId', async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
-
 // 🔥 إضافة endpoint لإعداد الأكواد المميزة
 app.get('/api/reward-codes/setup', async (req, res) => {
     try {
@@ -2088,6 +2119,47 @@ app.get('/api/stats', async (req, res) => {
         console.error('❌ خطأ في جلب الإحصائيات:', error);
         res.status(500).json({ success: false, error: error.message });
     }
+});
+
+// 🔥 endpoints التوكن - تم إصلاحها
+app.get('/api/token/current', (req, res) => {
+    try {
+        const currentToken = tokenSystem.getCurrentToken();
+        res.json({
+            success: true,
+            token: currentToken,
+            timestamp: Date.now(),
+            message: 'التوكن الحالي'
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: 'فشل في جلب التوكن'
+        });
+    }
+});
+
+app.get('/api/token/stats', (req, res) => {
+    try {
+        const stats = tokenSystem.getStats();
+        res.json({
+            success: true,
+            stats: stats
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: 'فشل في جلب إحصائيات التوكن'
+        });
+    }
+});
+
+// 🔥 endpoint للإعدادات
+app.get('/api/config', (req, res) => {
+    res.json({
+        success: true,
+        config: config
+    });
 });
 
 // 🛑 إيقاف نظيف للسيرفر
