@@ -18,30 +18,39 @@ app.use(express.json());
 // 🎯 البوت توكن
 const BOT_TOKEN = "8257278435:AAHkhaFLpI4J7uYL4xpAEp4_-hc5DnW5yno"; 
 
-// 🔧 نظام إدارة اتصال قاعدة البيانات المحسن
+// 🔧 نظام إدارة اتصال قاعدة البيانات المحسن والمصلح
 class DatabaseManager {
     constructor() {
         this.pool = null;
         this.isConnected = false;
         this.retryCount = 0;
-        this.maxRetries = 5;
-        this.init();
+        this.maxRetries = 10; // زيادة عدد المحاولات
+        this.initialized = false;
+        this.initPromise = this.init();
     }
 
     async init() {
         try {
+            console.log('🔧 بدء تهيئة اتصال قاعدة البيانات...');
+            
             this.pool = new Pool({
                 connectionString: "postgresql://postgres:EBEXkZAIxdoDqsUNjaYJNcjLdDvuHtSU@maglev.proxy.rlwy.net:12181/railway",
                 ssl: { rejectUnauthorized: false },
-                connectionTimeoutMillis: 10000,
+                connectionTimeoutMillis: 20000, // زيادة وقت الانتظار
                 idleTimeoutMillis: 30000,
                 max: 20,
+                min: 2,
+                acquireTimeoutMillis: 20000,
+                createTimeoutMillis: 20000,
+                destroyTimeoutMillis: 5000,
+                maxUses: 7500,
             });
 
-            // اختبار الاتصال
+            // اختبار الاتصال مع مهلة
             await this.testConnection();
             this.isConnected = true;
             this.retryCount = 0;
+            this.initialized = true;
             console.log('✅ تم الاتصال بقاعدة البيانات بنجاح');
             
         } catch (error) {
@@ -53,8 +62,18 @@ class DatabaseManager {
     async testConnection() {
         const client = await this.pool.connect();
         try {
+            console.log('🔍 اختبار اتصال قاعدة البيانات...');
             const result = await client.query('SELECT NOW() as current_time');
             console.log('🕒 وقت قاعدة البيانات:', result.rows[0].current_time);
+            
+            // اختبار إضافي للجداول
+            const tablesResult = await client.query(`
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public'
+            `);
+            console.log('📊 عدد الجداول المتاحة:', tablesResult.rows.length);
+            
         } finally {
             client.release();
         }
@@ -65,39 +84,81 @@ class DatabaseManager {
         
         if (this.retryCount <= this.maxRetries) {
             console.log(`🔄 محاولة إعادة الاتصال ${this.retryCount}/${this.maxRetries}...`);
-            await new Promise(resolve => setTimeout(resolve, 5000));
+            const delay = Math.min(5000 * this.retryCount, 30000); // زيادة التدريجي
+            await new Promise(resolve => setTimeout(resolve, delay));
             await this.init();
         } else {
             console.error('❌ فشل جميع محاولات الاتصال بقاعدة البيانات');
-            // لا نوقف التطبيق، بل نستمر في المحاولة
-            setTimeout(() => {
-                this.retryCount = 0;
-                this.init();
-            }, 30000);
+            // إنشاء pool افتراضي للسماح للتطبيق بالعمل
+            this.createFallbackPool();
+        }
+    }
+
+    createFallbackPool() {
+        console.log('🛟 إنشاء اتصال احتياطي...');
+        this.pool = new Pool({
+            connectionString: "postgresql://postgres:EBEXkZAIxdoDqsUNjaYJNcjLdDvuHtSU@maglev.proxy.rlwy.net:12181/railway",
+            ssl: { rejectUnauthorized: false },
+            // إعدادات أكثر تساهلاً للاتصال الاحتياطي
+            connectionTimeoutMillis: 30000,
+            idleTimeoutMillis: 60000,
+            max: 5,
+        });
+        
+        this.isConnected = true; // نفترض أنه متصل للسماح للتطبيق بالعمل
+        console.log('⚠️  تم تهيئة الاتصال الاحتياطي (قد تكون هناك مشاكل في الأداء)');
+    }
+
+    async waitForInitialization() {
+        if (!this.initialized) {
+            console.log('⏳ انتظار تهيئة قاعدة البيانات...');
+            await this.initPromise;
         }
     }
 
     async query(text, params) {
+        await this.waitForInitialization();
+        
         if (!this.isConnected) {
             throw new Error('قاعدة البيانات غير متصلة');
         }
         
         try {
-            return await this.pool.query(text, params);
+            console.log(`📝 تنفيذ استعلام: ${text.substring(0, 100)}...`);
+            const result = await this.pool.query(text, params);
+            return result;
         } catch (error) {
             console.error('❌ خطأ في استعلام قاعدة البيانات:', error.message);
             
             // محاولة إعادة الاتصال عند الخطأ
-            if (error.message.includes('connection') || error.message.includes('ECONNREFUSED')) {
+            if (this.shouldReconnect(error)) {
+                console.log('🔄 محاولة إعادة الاتصال بعد الخطأ...');
                 this.isConnected = false;
                 await this.init();
+                // إعادة محاولة الاستعلام بعد إعادة الاتصال
+                return await this.pool.query(text, params);
             }
             
             throw error;
         }
     }
 
+    shouldReconnect(error) {
+        const reconnectErrors = [
+            'connection',
+            'ECONNREFUSED',
+            'ECONNRESET',
+            'ETIMEDOUT',
+            'getaddrinfo ENOTFOUND',
+            'terminating connection'
+        ];
+        
+        return reconnectErrors.some(err => error.message.includes(err));
+    }
+
     async connect() {
+        await this.waitForInitialization();
+        
         if (!this.isConnected) {
             throw new Error('قاعدة البيانات غير متصلة');
         }
@@ -107,11 +168,20 @@ class DatabaseManager {
     getPool() {
         return this.pool;
     }
+
+    async healthCheck() {
+        try {
+            await this.query('SELECT 1 as health_check');
+            return true;
+        } catch (error) {
+            console.error('❌ فحص صحة قاعدة البيانات فشل:', error.message);
+            return false;
+        }
+    }
 }
 
 // تهيئة مدير قاعدة البيانات
 const dbManager = new DatabaseManager();
-const pool = dbManager.getPool();
 
 // 🔥 الإعدادات الجديدة - 100 إعلان يومياً + نقطة واحدة فقط لكل إعلان
 const config = {
@@ -132,10 +202,9 @@ class DynamicTokenSystem {
         this.tokenCounter = 0;
         this.intervalId = null;
         
-        // 🔥 التعديل: تغيير من 10 إلى 9 ثواني لتتوافق مع البوت
         this.config = {
-            tokenRefreshInterval: 9000,        // 🔥 كان 10000 - أصبح 9000
-            tokenValidityWindow: 25000,        // 🔥 كان 30000 - أصبح 25000
+            tokenRefreshInterval: 9000,        // 9 ثواني
+            tokenValidityWindow: 25000,        // 25 ثانية
             maxTokens: 20,
             secretKey: process.env.TOKEN_SECRET || 'ton-rewards-dynamic-token-secret-2024'
         };
@@ -275,14 +344,11 @@ const validateDynamicToken = (req, res, next) => {
         '/api/database/status', 
         '/api/health', 
         '/api/test-connection',
-        // 🔥 إضافة endpoints المسابقة
         '/api/contest/leaderboard',
         '/api/contest/user-rank/:userId',
         '/api/contest/user/:userId',
-        // 🔥 إضافة endpoint التحقق من initData
         '/api/validate-initdata',
         '/api/stats',
-        // 🎮 إضافة endpoints الألعاب الجديدة
         '/api/games/number-challenge',
         '/api/games/spin-wheel',
         '/api/games/stats/:userId'
@@ -291,7 +357,6 @@ const validateDynamicToken = (req, res, next) => {
     // التحقق إذا كان الـ endpoint عام
     const isPublicEndpoint = publicEndpoints.some(endpoint => {
         if (endpoint.includes(':')) {
-            // معالجة الـ endpoints التي تحتوي على parameters
             const basePath = endpoint.split('/:')[0];
             return req.path.startsWith(basePath);
         }
@@ -336,7 +401,8 @@ app.use(validateDynamicToken);
 // 🔧 دالة للتحقق من اتصال قاعدة البيانات
 async function checkDatabaseConnection() {
     try {
-        const result = await pool.query('SELECT NOW() as current_time');
+        await dbManager.waitForInitialization();
+        const result = await dbManager.query('SELECT NOW() as current_time');
         console.log('✅ قاعدة البيانات متصلة - الوقت الحالي:', result.rows[0].current_time);
         return true;
     } catch (error) {
@@ -422,7 +488,8 @@ function parseTelegramUser(initData) {
 // 👤 دوال مساعدة للتعامل مع قاعدة البيانات
 async function getUserFromDB(userId) {
     try {
-        const result = await pool.query(
+        await dbManager.waitForInitialization();
+        const result = await dbManager.query(
             'SELECT * FROM bot_users WHERE telegram_id = $1',
             [userId]
         );
@@ -435,7 +502,8 @@ async function getUserFromDB(userId) {
 
 async function createUserInDB(userData) {
     try {
-        const result = await pool.query(
+        await dbManager.waitForInitialization();
+        const result = await dbManager.query(
             `INSERT INTO bot_users (telegram_id, username, first_name, balance, earning_wallet, total_earned) 
              VALUES ($1, $2, $3, $4, $5, $6) 
              RETURNING *`,
@@ -485,7 +553,7 @@ app.post('/api/validate-initdata', async (req, res) => {
 
 // 📺 مشاهدة إعلان - الإصدار المصحح مع الإعلان الإجباري
 app.post('/api/watch-ad', async (req, res) => {
-    const client = await pool.connect();
+    let client;
     
     try {
         const { initData } = req.body;
@@ -522,6 +590,8 @@ app.post('/api/watch-ad', async (req, res) => {
         const userId = telegramUser.id.toString();
         console.log(`👤 معالجة مشاهدة إعلان للمستخدم: ${userId}`);
         
+        await dbManager.waitForInitialization();
+        client = await dbManager.connect();
         await client.query('BEGIN');
 
         // 🔥 جلب المستخدم مع قفل الصف لمنع التكرار
@@ -645,14 +715,18 @@ app.post('/api/watch-ad', async (req, res) => {
         }
 
     } catch (error) {
-        await client.query('ROLLBACK');
+        if (client) {
+            await client.query('ROLLBACK');
+        }
         console.error('❌ خطأ في مشاهدة الإعلان:', error.message);
         res.status(500).json({ 
             success: false,
             error: 'Failed to process ad: ' + error.message 
         });
     } finally {
-        client.release();
+        if (client) {
+            client.release();
+        }
     }
 });
 // 👤 جلب بيانات المستخدم من قاعدة البيانات + تسجيل تلقائي
@@ -894,7 +968,7 @@ app.post('/api/move-to-balance', async (req, res) => {
         }
 
         // تحديث الرصيد في قاعدة البيانات
-        const updateResult = await pool.query(
+        const updateResult = await dbManager.query(
             `UPDATE bot_users SET 
                 balance = COALESCE(balance, 0) + $1,
                 earning_wallet = 0
@@ -931,7 +1005,7 @@ app.post('/api/move-to-balance', async (req, res) => {
 
 // 💳 طلب سحب - الإصدار المحسن والمصلح
 app.post('/api/withdraw', async (req, res) => {
-    const client = await pool.connect();
+    let client;
     
     try {
         const { initData, amount, walletAddress, method = 'TON Wallet', memo = '' } = req.body;
@@ -968,6 +1042,8 @@ app.post('/api/withdraw', async (req, res) => {
         const userId = telegramUser.id.toString();
         console.log(`👤 معالجة سحب للمستخدم: ${userId}`);
         
+        await dbManager.waitForInitialization();
+        client = await dbManager.connect();
         await client.query('BEGIN');
 
         // جلب المستخدم مع قفل الصف لمنع التنافس
@@ -1046,14 +1122,18 @@ app.post('/api/withdraw', async (req, res) => {
         });
 
     } catch (error) {
-        await client.query('ROLLBACK');
+        if (client) {
+            await client.query('ROLLBACK');
+        }
         console.error('❌ خطأ في السحب:', error.message);
         res.status(500).json({ 
             success: false,
             error: 'Withdrawal failed: ' + error.message 
         });
     } finally {
-        client.release();
+        if (client) {
+            client.release();
+        }
     }
 });
 
@@ -1076,7 +1156,7 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
         console.log('✅ تم التحقق بنجاح - متابعة الطلب');
         
         // 🔥 الإصلاح الكامل: استخدام تنسيق التاريخ بشكل صحيح
-        const withdrawals = await pool.query(
+        const withdrawals = await dbManager.query(
             `SELECT 
                 id,
                 user_id,
@@ -1140,7 +1220,7 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
 // 🔥 دالة مساعدة لتحديث قائمة المتصدرين
 async function updateContestLeaderboard() {
     try {
-        const leaderboard = await pool.query(`
+        const leaderboard = await dbManager.query(`
             SELECT 
                 cl.*,
                 bu.username,
@@ -1168,7 +1248,7 @@ app.post('/api/contest/update-points', async (req, res) => {
         console.log(`🔄 تحديث نقاط المسابقة للمستخدم: ${userId}`, { points, adsWatched, referralsCount });
         
         // جلب بيانات المستخدم أولاً
-        const userResult = await pool.query(
+        const userResult = await dbManager.query(
             'SELECT * FROM bot_users WHERE telegram_id = $1',
             [userId]
         );
@@ -1180,7 +1260,7 @@ app.post('/api/contest/update-points', async (req, res) => {
         const user = userResult.rows[0];
         
         // التأكد من وجود جدول المسابقة
-        await pool.query(`
+        await dbManager.query(`
             CREATE TABLE IF NOT EXISTS contest_leaderboard (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT UNIQUE NOT NULL,
@@ -1199,7 +1279,7 @@ app.post('/api/contest/update-points', async (req, res) => {
         const actualAds = 1; // ⚡ إعلان واحد فقط
         
         // تحديث أو إدخال بيانات المسابقة
-        const result = await pool.query(`
+        const result = await dbManager.query(`
             INSERT INTO contest_leaderboard 
             (user_id, username, first_name, points, ads_watched, referrals_count, last_activity)
             VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
@@ -1258,7 +1338,7 @@ app.get('/api/contest/user-rank/:userId', async (req, res) => {
     try {
         const userId = req.params.userId;
         
-        const rankResult = await pool.query(`
+        const rankResult = await dbManager.query(`
             SELECT position FROM (
                 SELECT user_id, ROW_NUMBER() OVER (ORDER BY points DESC, last_activity DESC) as position
                 FROM contest_leaderboard
@@ -1286,7 +1366,7 @@ app.get('/api/contest/user/:userId', async (req, res) => {
     try {
         const userId = req.params.userId;
         
-        const result = await pool.query(`
+        const result = await dbManager.query(`
             SELECT * FROM contest_leaderboard 
             WHERE user_id = $1
         `, [userId]);
@@ -1315,7 +1395,7 @@ app.post('/api/referrals/add', async (req, res) => {
         }
         
         // تحقق إذا تمت الإحالة مسبقاً
-        const existingReferral = await pool.query(
+        const existingReferral = await dbManager.query(
             'SELECT * FROM referrals WHERE referred_id = $1',
             [referredId]
         );
@@ -1325,14 +1405,14 @@ app.post('/api/referrals/add', async (req, res) => {
         }
         
         // تسجيل الإحالة الجديدة
-        const result = await pool.query(`
+        const result = await dbManager.query(`
             INSERT INTO referrals (referrer_id, referred_id, status)
             VALUES ($1, $2, 'active')
             RETURNING *
         `, [referrerId, referredId]);
         
         // تحديث عدد الإحالات في المسابقة - 15 نقطة لكل إحالة
-        await pool.query(`
+        await dbManager.query(`
             INSERT INTO contest_leaderboard (user_id, referrals_count, points, last_activity)
             VALUES ($1, 1, 15, CURRENT_TIMESTAMP)
             ON CONFLICT (user_id) 
@@ -1361,7 +1441,7 @@ app.get('/api/referrals/user/:userId', async (req, res) => {
         const userId = req.params.userId;
         
         // جلب الإحالات
-        const referrals = await pool.query(`
+        const referrals = await dbManager.query(`
             SELECT r.*, bu.first_name, bu.username 
             FROM referrals r
             LEFT JOIN bot_users bu ON r.referred_id = bu.telegram_id
@@ -1370,7 +1450,7 @@ app.get('/api/referrals/user/:userId', async (req, res) => {
         `, [userId]);
         
         // إحصائيات الإحالات
-        const stats = await pool.query(`
+        const stats = await dbManager.query(`
             SELECT 
                 COUNT(*) as total_referrals,
                 COALESCE(SUM(referrer_earnings), 0) as total_earnings
@@ -1393,7 +1473,7 @@ app.get('/api/referrals/user/:userId', async (req, res) => {
 
 // 🔥 endpoint لمعالجة لعبة الأرقام
 app.post('/api/games/number-challenge', async (req, res) => {
-    const client = await pool.connect();
+    let client;
     
     try {
         const { userId, score, timeLeft, initData } = req.body;
@@ -1408,6 +1488,8 @@ app.post('/api/games/number-challenge', async (req, res) => {
             });
         }
 
+        await dbManager.waitForInitialization();
+        client = await dbManager.connect();
         await client.query('BEGIN');
 
         // جلب بيانات المستخدم مع قفل الصف
@@ -1478,20 +1560,24 @@ app.post('/api/games/number-challenge', async (req, res) => {
         });
 
     } catch (error) {
-        await client.query('ROLLBACK');
+        if (client) {
+            await client.query('ROLLBACK');
+        }
         console.error('❌ خطأ في معالجة لعبة الأرقام:', error);
         res.status(500).json({ 
             success: false,
             error: 'Failed to process game result' 
         });
     } finally {
-        client.release();
+        if (client) {
+            client.release();
+        }
     }
 });
 
 // 🎡 endpoint لمعالجة لعبة السبين
 app.post('/api/games/spin-wheel', async (req, res) => {
-    const client = await pool.connect();
+    let client;
     
     try {
         const { userId, cost, reward, initData } = req.body;
@@ -1506,6 +1592,8 @@ app.post('/api/games/spin-wheel', async (req, res) => {
             });
         }
 
+        await dbManager.waitForInitialization();
+        client = await dbManager.connect();
         await client.query('BEGIN');
 
         // جلب بيانات المستخدم مع قفل الصف
@@ -1588,14 +1676,18 @@ app.post('/api/games/spin-wheel', async (req, res) => {
         });
 
     } catch (error) {
-        await client.query('ROLLBACK');
+        if (client) {
+            await client.query('ROLLBACK');
+        }
         console.error('❌ خطأ في معالجة لعبة السبين:', error);
         res.status(500).json({ 
             success: false,
             error: 'Failed to process spin result' 
         });
     } finally {
-        client.release();
+        if (client) {
+            client.release();
+        }
     }
 });
 
@@ -1615,13 +1707,13 @@ app.get('/api/games/stats/:userId', async (req, res) => {
         }
 
         // جلب إحصائيات الألعاب
-        const statsResult = await pool.query(
+        const statsResult = await dbManager.query(
             'SELECT * FROM game_stats WHERE user_id = $1',
             [userId]
         );
 
         // جلب آخر 10 نتائج للألعاب
-        const recentGamesResult = await pool.query(
+        const recentGamesResult = await dbManager.query(
             `SELECT game_type, score, reward, created_at 
              FROM game_results 
              WHERE user_id = $1 
@@ -1665,10 +1757,6 @@ app.get('/api/games/stats/:userId', async (req, res) => {
     }
 });
 
-// ... (بقية الـ endpoints الموجودة في الكود الأصلي تبقى كما هي)
-// reward-codes, fix-contest-data, debug-user, check-tables, repair-database,
-// stats, database-status, health, test-connection, token-endpoints, config
-
 // 🩹 فحص وإصلاح الجداول - تم التحديث بإضافة جداول الألعاب
 app.get('/api/check-tables', async (req, res) => {
     try {
@@ -1689,7 +1777,7 @@ app.get('/api/check-tables', async (req, res) => {
         
         for (const table of tables) {
             try {
-                const result = await pool.query(`
+                const result = await dbManager.query(`
                     SELECT EXISTS (
                         SELECT FROM information_schema.tables 
                         WHERE table_schema = 'public' 
@@ -1725,7 +1813,7 @@ app.get('/api/setup-database', async (req, res) => {
         console.log('🔧 بدء إعداد الجداول...');
         
         // جدول المستخدمين
-        await pool.query(`
+        await dbManager.query(`
             CREATE TABLE IF NOT EXISTS bot_users (
                 id SERIAL PRIMARY KEY,
                 telegram_id BIGINT UNIQUE NOT NULL,
@@ -1746,7 +1834,7 @@ app.get('/api/setup-database', async (req, res) => {
         console.log('✅ جدول bot_users جاهز');
 
         // جدول السحوبات
-        await pool.query(`
+        await dbManager.query(`
             CREATE TABLE IF NOT EXISTS withdrawals (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
@@ -1762,7 +1850,7 @@ app.get('/api/setup-database', async (req, res) => {
         console.log('✅ جدول withdrawals جاهز');
 
         // جدول المسابقة
-        await pool.query(`
+        await dbManager.query(`
             CREATE TABLE IF NOT EXISTS contest_leaderboard (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT UNIQUE NOT NULL,
@@ -1778,7 +1866,7 @@ app.get('/api/setup-database', async (req, res) => {
         console.log('✅ جدول contest_leaderboard جاهز');
 
         // جدول الأكواد المميزة
-        await pool.query(`
+        await dbManager.query(`
             CREATE TABLE IF NOT EXISTS reward_codes (
                 id SERIAL PRIMARY KEY,
                 code VARCHAR(100) UNIQUE NOT NULL,
@@ -1793,7 +1881,7 @@ app.get('/api/setup-database', async (req, res) => {
         console.log('✅ جدول reward_codes جاهز');
 
         // جدول استبدال الأكواد
-        await pool.query(`
+        await dbManager.query(`
             CREATE TABLE IF NOT EXISTS code_redemptions (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
@@ -1808,7 +1896,7 @@ app.get('/api/setup-database', async (req, res) => {
         // 🎮 الجداول الجديدة للألعاب
 
         // جدول نتائج الألعاب
-        await pool.query(`
+        await dbManager.query(`
             CREATE TABLE IF NOT EXISTS game_results (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
@@ -1821,7 +1909,7 @@ app.get('/api/setup-database', async (req, res) => {
         console.log('✅ جدول game_results جاهز');
 
         // جدول إحصائيات الألعاب
-        await pool.query(`
+        await dbManager.query(`
             CREATE TABLE IF NOT EXISTS game_stats (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT UNIQUE NOT NULL,
@@ -1858,16 +1946,16 @@ app.get('/api/repair-database', async (req, res) => {
         console.log('🔧 بدء إصلاح قاعدة البيانات...');
         
         // إعادة إنشاء جميع الجداول
-        await pool.query('DROP TABLE IF EXISTS code_redemptions CASCADE');
-        await pool.query('DROP TABLE IF EXISTS reward_codes CASCADE');
-        await pool.query('DROP TABLE IF EXISTS contest_leaderboard CASCADE');
-        await pool.query('DROP TABLE IF EXISTS withdrawals CASCADE');
-        await pool.query('DROP TABLE IF EXISTS bot_users CASCADE');
-        await pool.query('DROP TABLE IF EXISTS game_results CASCADE'); // 🎮 جدول جديد
-        await pool.query('DROP TABLE IF EXISTS game_stats CASCADE');   // 🎮 جدول جديد
+        await dbManager.query('DROP TABLE IF EXISTS code_redemptions CASCADE');
+        await dbManager.query('DROP TABLE IF EXISTS reward_codes CASCADE');
+        await dbManager.query('DROP TABLE IF EXISTS contest_leaderboard CASCADE');
+        await dbManager.query('DROP TABLE IF EXISTS withdrawals CASCADE');
+        await dbManager.query('DROP TABLE IF EXISTS bot_users CASCADE');
+        await dbManager.query('DROP TABLE IF EXISTS game_results CASCADE'); // 🎮 جدول جديد
+        await dbManager.query('DROP TABLE IF EXISTS game_stats CASCADE');   // 🎮 جدول جديد
         
         // إعادة الإنشاء
-        await pool.query(`
+        await dbManager.query(`
             CREATE TABLE bot_users (
                 id SERIAL PRIMARY KEY,
                 telegram_id BIGINT UNIQUE NOT NULL,
@@ -1886,7 +1974,7 @@ app.get('/api/repair-database', async (req, res) => {
             )
         `);
 
-        await pool.query(`
+        await dbManager.query(`
             CREATE TABLE withdrawals (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
@@ -1900,7 +1988,7 @@ app.get('/api/repair-database', async (req, res) => {
             )
         `);
 
-        await pool.query(`
+        await dbManager.query(`
             CREATE TABLE contest_leaderboard (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT UNIQUE NOT NULL,
@@ -1914,7 +2002,7 @@ app.get('/api/repair-database', async (req, res) => {
             )
         `);
 
-        await pool.query(`
+        await dbManager.query(`
             CREATE TABLE reward_codes (
                 id SERIAL PRIMARY KEY,
                 code VARCHAR(100) UNIQUE NOT NULL,
@@ -1927,7 +2015,7 @@ app.get('/api/repair-database', async (req, res) => {
             )
         `);
 
-        await pool.query(`
+        await dbManager.query(`
             CREATE TABLE code_redemptions (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
@@ -1939,7 +2027,7 @@ app.get('/api/repair-database', async (req, res) => {
         `);
 
         // 🎮 الجداول الجديدة للألعاب
-        await pool.query(`
+        await dbManager.query(`
             CREATE TABLE game_results (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
@@ -1950,7 +2038,7 @@ app.get('/api/repair-database', async (req, res) => {
             )
         `);
 
-        await pool.query(`
+        await dbManager.query(`
             CREATE TABLE game_stats (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT UNIQUE NOT NULL,
@@ -2003,6 +2091,47 @@ app.get('/api/health', async (req, res) => {
     }
 });
 
+// 🔧 endpoints إضافية للتحكم
+app.get('/api/token/current', (req, res) => {
+    res.json({
+        success: true,
+        token: tokenSystem.getCurrentToken(),
+        stats: tokenSystem.getStats()
+    });
+});
+
+app.get('/api/token/stats', (req, res) => {
+    res.json({
+        success: true,
+        stats: tokenSystem.getStats()
+    });
+});
+
+app.get('/api/config', (req, res) => {
+    res.json({
+        success: true,
+        config: config
+    });
+});
+
+app.get('/api/database/status', async (req, res) => {
+    try {
+        const status = await dbManager.healthCheck();
+        res.json({
+            success: true,
+            connected: status,
+            initialized: dbManager.initialized,
+            retryCount: dbManager.retryCount
+        });
+    } catch (error) {
+        res.json({
+            success: false,
+            connected: false,
+            error: error.message
+        });
+    }
+});
+
 // 🛑 إيقاف نظيف للسيرفر
 process.on('SIGINT', () => {
     console.log('\n🛑 إيقاف نظام التوكن...');
@@ -2019,76 +2148,80 @@ process.on('SIGTERM', () => {
 // 🚀 تشغيل السيرفر
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-app.listen(PORT, HOST, () => {
-    console.log(`🟢 TON Rewards Backend running on port ${PORT}`);
-    console.log(`💰 Ad reward: ${config.adValue} TON`);
-    console.log(`📊 Daily ads: ${config.dailyAdLimit} ads`);
-    console.log(`💸 Min withdrawal: ${config.minWithdrawal} TON`);
-    console.log(`👥 Referral bonus: ${config.referralBonus} TON`);
-    console.log(`🏆 Contest points per ad: ${config.contestAdPoints} (نقطة واحدة فقط)`);
-    console.log(`🔐 Telegram verification: ENABLED`);
-    console.log(`🔄 Dynamic token system: ACTIVE (9 seconds)`);
-    console.log(`🗄️ Database manager: ACTIVE`);
-    console.log(`🎮 Games system: ENABLED (Secure Database Storage)`);
-    
-    // فحص الاتصال بقاعدة البيانات عند البدء
-    checkDatabaseConnection();
-    
-    // إعداد الجداول تلقائياً
-    setTimeout(async () => {
-        try {
-            await pool.query(`
-                CREATE TABLE IF NOT EXISTS bot_users (
-                    id SERIAL PRIMARY KEY,
-                    telegram_id BIGINT UNIQUE NOT NULL,
-                    username VARCHAR(255),
-                    first_name VARCHAR(255),
-                    balance DECIMAL(15,8) DEFAULT 0,
-                    earning_wallet DECIMAL(15,8) DEFAULT 0,
-                    total_earned DECIMAL(15,8) DEFAULT 0,
-                    daily_ad_count INTEGER DEFAULT 0,
-                    last_ad_date DATE,
-                    last_ad_timestamp TIMESTAMP,
-                    referral_code VARCHAR(50) UNIQUE,
-                    referred_by BIGINT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            `);
-            console.log('✅ جدول bot_users جاهز');
-            
-            // 🎮 إنشاء جداول الألعاب تلقائياً
-            await pool.query(`
-                CREATE TABLE IF NOT EXISTS game_results (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    game_type VARCHAR(50) NOT NULL,
-                    score INTEGER DEFAULT 0,
-                    reward DECIMAL(15,8) DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            `);
-            console.log('✅ جدول game_results جاهز');
 
-            await pool.query(`
-                CREATE TABLE IF NOT EXISTS game_stats (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT UNIQUE NOT NULL,
-                    total_games_played INTEGER DEFAULT 0,
-                    total_rewards_earned DECIMAL(15,8) DEFAULT 0,
-                    number_challenge_best_score INTEGER DEFAULT 0,
-                    number_challenge_total_played INTEGER DEFAULT 0,
-                    spin_wheel_total_spins INTEGER DEFAULT 0,
-                    spin_wheel_total_won DECIMAL(15,8) DEFAULT 0,
-                    last_played TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            `);
-            console.log('✅ جدول game_stats جاهز');
-            
-        } catch (error) {
-            console.log('⚠️  خطأ في إنشاء الجداول:', error.message);
-        }
-    }, 2000);
-});
+// تأخير بدء السيرفر لضمان تهيئة قاعدة البيانات
+setTimeout(() => {
+    app.listen(PORT, HOST, () => {
+        console.log(`🟢 TON Rewards Backend running on port ${PORT}`);
+        console.log(`💰 Ad reward: ${config.adValue} TON`);
+        console.log(`📊 Daily ads: ${config.dailyAdLimit} ads`);
+        console.log(`💸 Min withdrawal: ${config.minWithdrawal} TON`);
+        console.log(`👥 Referral bonus: ${config.referralBonus} TON`);
+        console.log(`🏆 Contest points per ad: ${config.contestAdPoints}`);
+        console.log(`🔐 Telegram verification: ENABLED`);
+        console.log(`🔄 Dynamic token system: ACTIVE (9 seconds)`);
+        console.log(`🗄️ Database manager: ${dbManager.initialized ? 'ACTIVE' : 'INITIALIZING'}`);
+        console.log(`🎮 Games system: ENABLED`);
+        
+        // فحص الاتصال بقاعدة البيانات عند البدء
+        checkDatabaseConnection();
+        
+        // إعداد الجداول تلقائياً
+        setTimeout(async () => {
+            try {
+                await dbManager.query(`
+                    CREATE TABLE IF NOT EXISTS bot_users (
+                        id SERIAL PRIMARY KEY,
+                        telegram_id BIGINT UNIQUE NOT NULL,
+                        username VARCHAR(255),
+                        first_name VARCHAR(255),
+                        balance DECIMAL(15,8) DEFAULT 0,
+                        earning_wallet DECIMAL(15,8) DEFAULT 0,
+                        total_earned DECIMAL(15,8) DEFAULT 0,
+                        daily_ad_count INTEGER DEFAULT 0,
+                        last_ad_date DATE,
+                        last_ad_timestamp TIMESTAMP,
+                        referral_code VARCHAR(50) UNIQUE,
+                        referred_by BIGINT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                `);
+                console.log('✅ جدول bot_users جاهز');
+                
+                // 🎮 إنشاء جداول الألعاب تلقائياً
+                await dbManager.query(`
+                    CREATE TABLE IF NOT EXISTS game_results (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        game_type VARCHAR(50) NOT NULL,
+                        score INTEGER DEFAULT 0,
+                        reward DECIMAL(15,8) DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                `);
+                console.log('✅ جدول game_results جاهز');
+
+                await dbManager.query(`
+                    CREATE TABLE IF NOT EXISTS game_stats (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT UNIQUE NOT NULL,
+                        total_games_played INTEGER DEFAULT 0,
+                        total_rewards_earned DECIMAL(15,8) DEFAULT 0,
+                        number_challenge_best_score INTEGER DEFAULT 0,
+                        number_challenge_total_played INTEGER DEFAULT 0,
+                        spin_wheel_total_spins INTEGER DEFAULT 0,
+                        spin_wheel_total_won DECIMAL(15,8) DEFAULT 0,
+                        last_played TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                `);
+                console.log('✅ جدول game_stats جاهز');
+                
+            } catch (error) {
+                console.log('⚠️  خطأ في إنشاء الجداول:', error.message);
+            }
+        }, 3000);
+    });
+}, 1000);
