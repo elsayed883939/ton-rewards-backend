@@ -281,14 +281,7 @@ const validateDynamicToken = (req, res, next) => {
         '/api/contest/user/:userId',
         // 🔥 إضافة endpoint التحقق من initData
         '/api/validate-initdata',
-        '/api/stats',
-        // 🎮 إضافة endpoints الألعاب
-        '/api/games/number-challenge',
-        '/api/games/spin-wheel',
-        '/api/games/math-challenge',
-        '/api/games/stats/:userId',
-        '/api/games/tickets/:userId',
-        '/api/games/use-ticket'
+        '/api/stats'
     ];
     
     // التحقق إذا كان الـ endpoint عام
@@ -458,382 +451,6 @@ async function createUserInDB(userData) {
     }
 }
 
-// 🎮 نظام الألعاب المحسن - الإصدار الجديد
-
-// 🎯 إنشاء جداول الألعاب إذا لم تكن موجودة
-async function setupGamesTables() {
-    try {
-        console.log('🎮 بدء إعداد جداول الألعاب...');
-        
-        // جدول إحصائيات الألعاب
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS game_stats (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                game_type VARCHAR(50) NOT NULL,
-                total_played INTEGER DEFAULT 0,
-                total_won DECIMAL(15,8) DEFAULT 0,
-                best_score INTEGER DEFAULT 0,
-                last_played TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(user_id, game_type)
-            )
-        `);
-        
-        // جدول التذاكر
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS user_tickets (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT UNIQUE NOT NULL,
-                ticket_count INTEGER DEFAULT 0,
-                last_ticket_earned TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        
-        // جدول تاريخ الألعاب
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS game_history (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                game_type VARCHAR(50) NOT NULL,
-                score INTEGER DEFAULT 0,
-                reward DECIMAL(15,8) DEFAULT 0,
-                played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        
-        console.log('✅ تم إعداد جداول الألعاب بنجاح');
-    } catch (error) {
-        console.error('❌ خطأ في إعداد جداول الألعاب:', error);
-    }
-}
-
-// 🎫 نظام التذاكر المحسن
-class TicketSystem {
-    constructor() {
-        this.ticketPerAd = 1;
-    }
-    
-    // 🎫 منح تذكرة بعد مشاهدة إعلان
-    async grantTicketForAd(userId) {
-        try {
-            const result = await pool.query(`
-                INSERT INTO user_tickets (user_id, ticket_count, last_ticket_earned)
-                VALUES ($1, $2, CURRENT_TIMESTAMP)
-                ON CONFLICT (user_id) 
-                DO UPDATE SET 
-                    ticket_count = user_tickets.ticket_count + $2,
-                    last_ticket_earned = EXCLUDED.last_ticket_earned,
-                    updated_at = CURRENT_TIMESTAMP
-                RETURNING ticket_count
-            `, [userId, this.ticketPerAd]);
-            
-            return result.rows[0]?.ticket_count || 0;
-        } catch (error) {
-            console.error('❌ خطأ في منح التذكرة:', error);
-            return 0;
-        }
-    }
-    
-    // 🎫 استخدام تذكرة للعبة
-    async useTicket(userId, gameType) {
-        const client = await pool.connect();
-        try {
-            await client.query('BEGIN');
-            
-            // التحقق من وجود تذاكر كافية
-            const ticketCheck = await client.query(
-                'SELECT ticket_count FROM user_tickets WHERE user_id = $1 FOR UPDATE',
-                [userId]
-            );
-            
-            if (ticketCheck.rows.length === 0 || ticketCheck.rows[0].ticket_count < 1) {
-                await client.query('ROLLBACK');
-                return { success: false, error: 'لا توجد تذاكر كافية' };
-            }
-            
-            // استخدام التذكرة
-            const updateResult = await client.query(`
-                UPDATE user_tickets 
-                SET ticket_count = ticket_count - 1, updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = $1
-                RETURNING ticket_count
-            `, [userId]);
-            
-            await client.query('COMMIT');
-            
-            return { 
-                success: true, 
-                remainingTickets: updateResult.rows[0].ticket_count 
-            };
-            
-        } catch (error) {
-            await client.query('ROLLBACK');
-            console.error('❌ خطأ في استخدام التذكرة:', error);
-            return { success: false, error: error.message };
-        } finally {
-            client.release();
-        }
-    }
-    
-    // 🎫 جلب عدد التذاكر
-    async getUserTickets(userId) {
-        try {
-            const result = await pool.query(
-                'SELECT ticket_count FROM user_tickets WHERE user_id = $1',
-                [userId]
-            );
-            
-            return result.rows[0]?.ticket_count || 0;
-        } catch (error) {
-            console.error('❌ خطأ في جلب التذاكر:', error);
-            return 0;
-        }
-    }
-}
-
-// تهيئة نظام التذاكر
-const ticketSystem = new TicketSystem();
-
-// 🎮 نظام الألعاب المحسن
-class GameSystem {
-    constructor() {
-        this.minReward = 100;  // 100 RR
-        this.maxReward = 800;  // 800 RR
-    }
-    
-    // 🎯 توليد مكافأة عشوائية
-    generateRandomReward() {
-        return Math.floor(Math.random() * (this.maxReward - this.minReward + 1)) + this.minReward;
-    }
-    
-    // 🎯 تحديث إحصائيات اللعبة
-    async updateGameStats(userId, gameType, score, reward) {
-        try {
-            // تحويل المكافأة من RR إلى TON للحسابات
-            const rewardInTON = reward / 10000000; // تحويل RR إلى TON
-            
-            await pool.query(`
-                INSERT INTO game_stats (user_id, game_type, total_played, total_won, best_score)
-                VALUES ($1, $2, 1, $3, $4)
-                ON CONFLICT (user_id, game_type) 
-                DO UPDATE SET 
-                    total_played = game_stats.total_played + 1,
-                    total_won = game_stats.total_won + $3,
-                    best_score = GREATEST(game_stats.best_score, $4),
-                    last_played = CURRENT_TIMESTAMP
-            `, [userId, gameType, rewardInTON, score]);
-            
-            // تسجيل في التاريخ
-            await pool.query(`
-                INSERT INTO game_history (user_id, game_type, score, reward)
-                VALUES ($1, $2, $3, $4)
-            `, [userId, gameType, score, rewardInTON]);
-            
-        } catch (error) {
-            console.error('❌ خطأ في تحديث إحصائيات اللعبة:', error);
-        }
-    }
-    
-    // 🎯 معالجة نتيجة لعبة الأرقام
-    async processNumberChallenge(userId, score, timeTaken, initData) {
-        try {
-            if (!validateTelegramInitData(initData)) {
-                return { success: false, error: 'Invalid security signature' };
-            }
-            
-            // استخدام تذكرة
-            const ticketResult = await ticketSystem.useTicket(userId, 'number_challenge');
-            if (!ticketResult.success) {
-                return ticketResult;
-            }
-            
-            // توليد المكافأة
-            const baseReward = this.generateRandomReward();
-            const reward = score === 9 ? baseReward * 1.5 : baseReward; // مكافأة إضافية للإكمال الكامل
-            
-            // تحديث رصيد المستخدم
-            const user = await getUserFromDB(userId);
-            if (!user) {
-                return { success: false, error: 'User not found' };
-            }
-            
-            const newRRBalance = Math.floor((parseFloat(user.earning_wallet || 0) * 10000000)) + reward;
-            
-            await pool.query(
-                'UPDATE bot_users SET earning_wallet = $1 WHERE telegram_id = $2',
-                [newRRBalance / 10000000, userId]
-            );
-            
-            // تحديث الإحصائيات
-            await this.updateGameStats(userId, 'number_challenge', score, reward);
-            
-            return {
-                success: true,
-                score: score,
-                rewardRR: reward,
-                userRRBalance: newRRBalance,
-                remainingTickets: ticketResult.remainingTickets
-            };
-            
-        } catch (error) {
-            console.error('❌ خطأ في معالجة لعبة الأرقام:', error);
-            return { success: false, error: error.message };
-        }
-    }
-    
-    // 🎡 معالجة نتيجة لعبة السبين
-    async processSpinWheel(userId, cost, reward, initData) {
-        try {
-            if (!validateTelegramInitData(initData)) {
-                return { success: false, error: 'Invalid security signature' };
-            }
-            
-            // استخدام تذكرة
-            const ticketResult = await ticketSystem.useTicket(userId, 'spin_wheel');
-            if (!ticketResult.success) {
-                return ticketResult;
-            }
-            
-            // توليد المكافأة العشوائية
-            const actualReward = this.generateRandomReward();
-            
-            // تحديث رصيد المستخدم
-            const user = await getUserFromDB(userId);
-            if (!user) {
-                return { success: false, error: 'User not found' };
-            }
-            
-            const newRRBalance = Math.floor((parseFloat(user.earning_wallet || 0) * 10000000)) + actualReward;
-            
-            await pool.query(
-                'UPDATE bot_users SET earning_wallet = $1 WHERE telegram_id = $2',
-                [newRRBalance / 10000000, userId]
-            );
-            
-            // تحديث الإحصائيات
-            await this.updateGameStats(userId, 'spin_wheel', 1, actualReward);
-            
-            return {
-                success: true,
-                rewardRR: actualReward,
-                userRRBalance: newRRBalance,
-                remainingTickets: ticketResult.remainingTickets
-            };
-            
-        } catch (error) {
-            console.error('❌ خطأ في معالجة لعبة السبين:', error);
-            return { success: false, error: error.message };
-        }
-    }
-    
-    // 🧮 معالجة نتيجة لعبة الرياضيات
-    async processMathChallenge(userId, score, timeTaken, initData) {
-        try {
-            if (!validateTelegramInitData(initData)) {
-                return { success: false, error: 'Invalid security signature' };
-            }
-            
-            // استخدام تذكرة
-            const ticketResult = await ticketSystem.useTicket(userId, 'math_challenge');
-            if (!ticketResult.success) {
-                return ticketResult;
-            }
-            
-            // توليد المكافأة
-            const baseReward = this.generateRandomReward();
-            const reward = score === 3 ? baseReward * 1.5 : baseReward; // مكافأة إضافية للإكمال الكامل
-            
-            // تحديث رصيد المستخدم
-            const user = await getUserFromDB(userId);
-            if (!user) {
-                return { success: false, error: 'User not found' };
-            }
-            
-            const newRRBalance = Math.floor((parseFloat(user.earning_wallet || 0) * 10000000)) + reward;
-            
-            await pool.query(
-                'UPDATE bot_users SET earning_wallet = $1 WHERE telegram_id = $2',
-                [newRRBalance / 10000000, userId]
-            );
-            
-            // تحديث الإحصائيات
-            await this.updateGameStats(userId, 'math_challenge', score, reward);
-            
-            return {
-                success: true,
-                score: score,
-                rewardRR: reward,
-                userRRBalance: newRRBalance,
-                remainingTickets: ticketResult.remainingTickets
-            };
-            
-        } catch (error) {
-            console.error('❌ خطأ في معالجة لعبة الرياضيات:', error);
-            return { success: false, error: error.message };
-        }
-    }
-    
-    // 📊 جلب إحصائيات الألعاب
-    async getGameStats(userId) {
-        try {
-            const stats = await pool.query(`
-                SELECT 
-                    game_type,
-                    total_played,
-                    total_won,
-                    best_score,
-                    last_played
-                FROM game_stats 
-                WHERE user_id = $1
-            `, [userId]);
-            
-            const result = {
-                totalGamesPlayed: 0,
-                totalRewardsEarned: 0,
-                numberChallenge: {},
-                spinWheel: {},
-                mathChallenge: {}
-            };
-            
-            stats.rows.forEach(stat => {
-                result.totalGamesPlayed += stat.total_played;
-                result.totalRewardsEarned += parseFloat(stat.total_won || 0);
-                
-                if (stat.game_type === 'number_challenge') {
-                    result.numberChallenge = {
-                        bestScore: stat.best_score,
-                        totalPlayed: stat.total_played,
-                        totalWon: parseFloat(stat.total_won || 0)
-                    };
-                } else if (stat.game_type === 'spin_wheel') {
-                    result.spinWheel = {
-                        totalSpins: stat.total_played,
-                        totalWon: parseFloat(stat.total_won || 0)
-                    };
-                } else if (stat.game_type === 'math_challenge') {
-                    result.mathChallenge = {
-                        bestScore: stat.best_score,
-                        totalPlayed: stat.total_played,
-                        totalWon: parseFloat(stat.total_won || 0)
-                    };
-                }
-            });
-            
-            return { success: true, stats: result };
-            
-        } catch (error) {
-            console.error('❌ خطأ في جلب إحصائيات الألعاب:', error);
-            return { success: false, error: error.message };
-        }
-    }
-}
-
-// تهيئة نظام الألعاب
-const gameSystem = new GameSystem();
-
 // 🔥 إضافة endpoint جديد للتحقق من صحة initData
 app.post('/api/validate-initdata', async (req, res) => {
     try {
@@ -862,7 +479,7 @@ app.post('/api/validate-initdata', async (req, res) => {
     }
 });
 
-// 📺 مشاهدة إعلان - الإصدار المصحح مع نظام التذاكر
+// 📺 مشاهدة إعلان - الإصدار المصحح مع الإعلان الإجباري
 app.post('/api/watch-ad', async (req, res) => {
     const client = await pool.connect();
     
@@ -957,10 +574,6 @@ app.post('/api/watch-ad', async (req, res) => {
         const updatedUser = updateResult.rows[0];
         
         if (updatedUser) {
-            // 🎫 منح تذكرة للمستخدم
-            const newTicketCount = await ticketSystem.grantTicketForAd(userId);
-            console.log(`🎫 تم منح تذكرة للمستخدم: ${userId}, التذاكر الآن: ${newTicketCount}`);
-            
             // 🔥 تحديث نقاط المسابقة - نقطة واحدة فقط
             try {
                 // التحقق أولاً من وجود المستخدم في المسابقة
@@ -991,7 +604,7 @@ app.post('/api/watch-ad', async (req, res) => {
                     console.log(`✅ تم إدخال جديد في المسابقة: +1 نقطة للمستخدم ${userId}`);
                 }
                 
-                console.log('✅ تمت مشاهدة الإعلان بنجاح + نقطة مسابقة واحدة + تذكرة');
+                console.log('✅ تمت مشاهدة الإعلان بنجاح + نقطة مسابقة واحدة');
             } catch (contestError) {
                 console.log('⚠️  خطأ في تحديث المسابقة:', contestError.message);
                 // لا نوقف العملية إذا فشل تحديث المسابقة
@@ -1016,8 +629,7 @@ app.post('/api/watch-ad', async (req, res) => {
                 dailyRemaining: config.dailyAdLimit - (dailyAdCount + 1),
                 totalEarned: parseFloat(updatedUser.total_earned || 0),
                 contestPoints: 1, // ⚡ نقطة واحدة فقط
-                userRRBalance: Math.floor((parseFloat(updatedUser.earning_wallet || 0) * 10000000)), // 🔥 إضافة RR balance
-                ticketsEarned: 1 // 🎫 إضافة التذاكر
+                userRRBalance: Math.floor((parseFloat(updatedUser.earning_wallet || 0) * 10000000)) // 🔥 إضافة RR balance
             });
         } else {
             await client.query('ROLLBACK');
@@ -1039,148 +651,6 @@ app.post('/api/watch-ad', async (req, res) => {
         client.release();
     }
 });
-
-// 🎮 endpoints الألعاب الجديدة
-
-// 🎯 لعبة الأرقام
-app.post('/api/games/number-challenge', async (req, res) => {
-    try {
-        const { userId, score, timeLeft, initData } = req.body;
-        
-        console.log(`🎯 معالجة لعبة الأرقام للمستخدم: ${userId}`, { score, timeLeft });
-        
-        const result = await gameSystem.processNumberChallenge(userId, score, timeLeft, initData);
-        res.json(result);
-        
-    } catch (error) {
-        console.error('❌ خطأ في معالجة لعبة الأرقام:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
-    }
-});
-
-// 🎡 لعبة السبين
-app.post('/api/games/spin-wheel', async (req, res) => {
-    try {
-        const { userId, cost, reward, initData } = req.body;
-        
-        console.log(`🎡 معالجة لعبة السبين للمستخدم: ${userId}`, { cost, reward });
-        
-        const result = await gameSystem.processSpinWheel(userId, cost, reward, initData);
-        res.json(result);
-        
-    } catch (error) {
-        console.error('❌ خطأ في معالجة لعبة السبين:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
-    }
-});
-
-// 🧮 لعبة الرياضيات
-app.post('/api/games/math-challenge', async (req, res) => {
-    try {
-        const { userId, score, timeLeft, initData } = req.body;
-        
-        console.log(`🧮 معالجة لعبة الرياضيات للمستخدم: ${userId}`, { score, timeLeft });
-        
-        const result = await gameSystem.processMathChallenge(userId, score, timeLeft, initData);
-        res.json(result);
-        
-    } catch (error) {
-        console.error('❌ خطأ في معالجة لعبة الرياضيات:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
-    }
-});
-
-// 📊 جلب إحصائيات الألعاب
-app.get('/api/games/stats/:userId', async (req, res) => {
-    try {
-        const userId = req.params.userId;
-        const initData = req.query.initData;
-
-        if (!validateTelegramInitData(initData)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'Invalid security signature' 
-            });
-        }
-
-        const result = await gameSystem.getGameStats(userId);
-        res.json(result);
-        
-    } catch (error) {
-        console.error('❌ خطأ في جلب إحصائيات الألعاب:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
-    }
-});
-
-// 🎫 جلب عدد التذاكر
-app.get('/api/games/tickets/:userId', async (req, res) => {
-    try {
-        const userId = req.params.userId;
-        const initData = req.query.initData;
-
-        if (!validateTelegramInitData(initData)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'Invalid security signature' 
-            });
-        }
-
-        const ticketCount = await ticketSystem.getUserTickets(userId);
-        
-        res.json({
-            success: true,
-            tickets: ticketCount
-        });
-        
-    } catch (error) {
-        console.error('❌ خطأ في جلب التذاكر:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
-    }
-});
-
-// 🎫 استخدام تذكرة
-app.post('/api/games/use-ticket', async (req, res) => {
-    try {
-        const { userId, gameType, initData } = req.body;
-        
-        if (!validateTelegramInitData(initData)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'Invalid security signature' 
-            });
-        }
-
-        console.log(`🎫 محاولة استخدام تذكرة للمستخدم: ${userId} للعبة: ${gameType}`);
-        
-        const result = await ticketSystem.useTicket(userId, gameType);
-        res.json(result);
-        
-    } catch (error) {
-        console.error('❌ خطأ في استخدام التذكرة:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
-    }
-});
-
-// ... (استمرار من الجزء الأول)
-
 // 👤 جلب بيانات المستخدم من قاعدة البيانات + تسجيل تلقائي
 app.get('/api/user/:userId', async (req, res) => {
     try {
@@ -1237,9 +707,6 @@ app.get('/api/user/:userId', async (req, res) => {
         if (user) {
             console.log('✅ تم العثور على المستخدم');
             
-            // 🎫 جلب عدد التذاكر
-            const ticketCount = await ticketSystem.getUserTickets(userId);
-            
             // 🔥 حساب RR balance من earning wallet
             const userRRBalance = Math.floor((parseFloat(user.earning_wallet || 0) * 10000000));
             
@@ -1256,8 +723,7 @@ app.get('/api/user/:userId', async (req, res) => {
                     userRRBalance: userRRBalance // 🔥 إضافة RR balance
                 },
                 isNewUser: isNewUser,
-                welcomeMessage: isNewUser ? `🎉 أهلاً وسهلاً ${user.first_name}!` : `مرحباً بعودتك ${user.first_name}!`,
-                tickets: ticketCount // 🎫 إضافة التذاكر
+                welcomeMessage: isNewUser ? `🎉 أهلاً وسهلاً ${user.first_name}!` : `مرحباً بعودتك ${user.first_name}!`
             });
         } else {
             console.log('❌ فشل في التسجيل التلقائي');
@@ -1311,9 +777,6 @@ app.post('/api/register', async (req, res) => {
         if (user) {
             console.log('✅ المستخدم موجود بالفعل');
             
-            // 🎫 جلب عدد التذاكر
-            const ticketCount = await ticketSystem.getUserTickets(userId);
-            
             // 🔥 حساب RR balance من earning wallet
             const userRRBalance = Math.floor((parseFloat(user.earning_wallet || 0) * 10000000));
             
@@ -1329,7 +792,6 @@ app.post('/api/register', async (req, res) => {
                     totalEarned: parseFloat(user.total_earned || 0),
                     userRRBalance: userRRBalance // 🔥 إضافة RR balance
                 },
-                tickets: ticketCount, // 🎫 إضافة التذاكر
                 message: `مرحباً بعودتك ${user.first_name}!`
             });
         }
@@ -1346,10 +808,6 @@ app.post('/api/register', async (req, res) => {
 
         if (user) {
             console.log('✅ تم إنشاء المستخدم بنجاح');
-            
-            // 🎫 إنشاء سجل تذاكر للمستخدم الجديد
-            await ticketSystem.grantTicketForAd(userId);
-            
             res.json({ 
                 success: true, 
                 user: {
@@ -1362,7 +820,6 @@ app.post('/api/register', async (req, res) => {
                     totalEarned: parseFloat(user.total_earned || 0),
                     userRRBalance: 0 // 🔥 إضافة RR balance
                 },
-                tickets: 0, // 🎫 إضافة التذاكر
                 message: `🎉 أهلاً وسهلاً ${user.first_name}!`
             });
         } else {
@@ -1840,7 +1297,6 @@ app.get('/api/contest/user/:userId', async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
-
 // 👥 endpoints نظام الإحالات
 app.post('/api/referrals/add', async (req, res) => {
     try {
@@ -2202,8 +1658,6 @@ app.post('/api/reward-codes/redeem', async (req, res) => {
     }
 });
 
-// ... (استمرار من الجزء الثاني)
-
 // 🔧 إصلاح بيانات المسابقة والإعلانات
 app.post('/api/fix-contest-data', async (req, res) => {
     try {
@@ -2322,31 +1776,16 @@ app.get('/api/debug-user/:userId', async (req, res) => {
             [userId]
         );
         
-        // 🎫 بيانات التذاكر
-        const ticketsResult = await pool.query(
-            'SELECT ticket_count FROM user_tickets WHERE user_id = $1',
-            [userId]
-        );
-        
-        // 🎮 إحصائيات الألعاب
-        const gameStatsResult = await pool.query(
-            'SELECT * FROM game_stats WHERE user_id = $1',
-            [userId]
-        );
-        
         res.json({
             success: true,
             user: userResult.rows[0] || null,
             contest: contestResult.rows[0] || null,
             withdrawals: withdrawalsResult.rows,
-            tickets: ticketsResult.rows[0] || { ticket_count: 0 },
-            gameStats: gameStatsResult.rows,
             analysis: {
                 dailyAdCount: userResult.rows[0]?.daily_ad_count || 0,
                 contestPoints: contestResult.rows[0]?.points || 0,
                 contestAds: contestResult.rows[0]?.ads_watched || 0,
-                pointsPerAd: contestResult.rows[0]?.points / contestResult.rows[0]?.ads_watched || 0,
-                totalTickets: ticketsResult.rows[0]?.ticket_count || 0
+                pointsPerAd: contestResult.rows[0]?.points / contestResult.rows[0]?.ads_watched || 0
             }
         });
         
@@ -2391,37 +1830,12 @@ app.get('/api/debug-tables', async (req, res) => {
             ORDER BY ordinal_position
         `);
 
-        // فحص جداول الألعاب
-        const gameStatsColumns = await pool.query(`
-            SELECT column_name, data_type, is_nullable
-            FROM information_schema.columns
-            WHERE table_name = 'game_stats'
-            ORDER BY ordinal_position
-        `);
-
-        const userTicketsColumns = await pool.query(`
-            SELECT column_name, data_type, is_nullable
-            FROM information_schema.columns
-            WHERE table_name = 'user_tickets'
-            ORDER BY ordinal_position
-        `);
-
-        const gameHistoryColumns = await pool.query(`
-            SELECT column_name, data_type, is_nullable
-            FROM information_schema.columns
-            WHERE table_name = 'game_history'
-            ORDER BY ordinal_position
-        `);
-
         res.json({
             success: true,
             bot_users_columns: botUsersColumns.rows,
             withdrawals_columns: withdrawalsColumns.rows,
             contest_leaderboard_columns: contestColumns.rows,
             reward_codes_columns: rewardCodesColumns.rows,
-            game_stats_columns: gameStatsColumns.rows,
-            user_tickets_columns: userTicketsColumns.rows,
-            game_history_columns: gameHistoryColumns.rows,
             missing_memo: !withdrawalsColumns.rows.find(col => col.column_name === 'memo')
         });
     } catch (error) {
@@ -2456,20 +1870,6 @@ app.get('/api/stats', async (req, res) => {
             FROM contest_leaderboard
         `);
 
-        // 🎮 إحصائيات الألعاب
-        const gamesResult = await pool.query(`
-            SELECT 
-                COUNT(*) as total_games_played,
-                COALESCE(SUM(total_won), 0) as total_games_rewards
-            FROM game_stats
-        `);
-
-        // 🎫 إجمالي التذاكر
-        const ticketsResult = await pool.query(`
-            SELECT COALESCE(SUM(ticket_count), 0) as total_tickets
-            FROM user_tickets
-        `);
-
         res.json({
             success: true,
             stats: {
@@ -2479,10 +1879,7 @@ app.get('/api/stats', async (req, res) => {
                 totalWithdrawn: parseFloat(withdrawalsResult.rows[0].total_withdrawn),
                 totalContestants: parseInt(contestResult.rows[0].total_contestants),
                 totalPoints: parseInt(contestResult.rows[0].total_points),
-                totalAds: parseInt(contestResult.rows[0].total_ads),
-                totalGamesPlayed: parseInt(gamesResult.rows[0].total_games_played || 0),
-                totalGamesRewards: parseFloat(gamesResult.rows[0].total_games_rewards || 0),
-                totalTickets: parseInt(ticketsResult.rows[0].total_tickets || 0)
+                totalAds: parseInt(contestResult.rows[0].total_ads)
             },
             timestamp: new Date().toISOString()
         });
@@ -2572,10 +1969,7 @@ app.get('/api/check-tables', async (req, res) => {
             'withdrawals', 
             'contest_leaderboard',
             'reward_codes',
-            'code_redemptions',
-            'game_stats', // 🎮 جداول الألعاب الجديدة
-            'user_tickets',
-            'game_history'
+            'code_redemptions'
         ];
         
         const results = {};
@@ -2698,9 +2092,6 @@ app.get('/api/setup-database', async (req, res) => {
         `);
         console.log('✅ جدول code_redemptions جاهز');
 
-        // 🎮 إعداد جداول الألعاب
-        await setupGamesTables();
-
         res.json({
             success: true,
             message: 'تم إنشاء جميع الجداول بنجاح'
@@ -2749,11 +2140,6 @@ app.get('/api/repair-database', async (req, res) => {
         await pool.query('DROP TABLE IF EXISTS contest_leaderboard CASCADE');
         await pool.query('DROP TABLE IF EXISTS withdrawals CASCADE');
         await pool.query('DROP TABLE IF EXISTS bot_users CASCADE');
-        
-        // 🎮 حذف جداول الألعاب
-        await pool.query('DROP TABLE IF EXISTS game_history CASCADE');
-        await pool.query('DROP TABLE IF EXISTS user_tickets CASCADE');
-        await pool.query('DROP TABLE IF EXISTS game_stats CASCADE');
         
         // إعادة الإنشاء
         await pool.query(`
@@ -2827,9 +2213,6 @@ app.get('/api/repair-database', async (req, res) => {
             )
         `);
 
-        // 🎮 إعادة إنشاء جداول الألعاب
-        await setupGamesTables();
-
         res.json({
             success: true,
             message: 'تم إصلاح قاعدة البيانات بنجاح'
@@ -2867,10 +2250,8 @@ app.listen(PORT, HOST, () => {
     console.log(`💸 Min withdrawal: ${config.minWithdrawal} TON`);
     console.log(`👥 Referral bonus: ${config.referralBonus} TON`);
     console.log(`🏆 Contest points per ad: ${config.contestAdPoints} (نقطة واحدة فقط)`);
-    console.log(`🎮 Game system: ACTIVE (100-800 RR rewards)`);
-    console.log(`🎫 Ticket system: ACTIVE (1 ticket per ad)`);
     console.log(`🔐 Telegram verification: ENABLED`);
-    console.log(`🔄 Dynamic token system: ACTIVE (9 seconds)`);
+    console.log(`🔄 Dynamic token system: ACTIVE (9 seconds)`); // 🔥 تم التعديل
     console.log(`🗄️ Database manager: ACTIVE`);
     
     // فحص الاتصال بقاعدة البيانات عند البدء
@@ -2898,10 +2279,6 @@ app.listen(PORT, HOST, () => {
                 )
             `);
             console.log('✅ جدول bot_users جاهز');
-            
-            // 🎮 إعداد جداول الألعاب تلقائياً
-            await setupGamesTables();
-            
         } catch (error) {
             console.log('⚠️  خطأ في إنشاء الجداول:', error.message);
         }
