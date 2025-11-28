@@ -342,12 +342,7 @@ const validateDynamicToken = (req, res, next) => {
         '/api/contest/user-rank/:userId',
         '/api/contest/user/:userId',
         '/api/validate-initdata',
-        '/api/stats',
-        '/api/games/number-challenge',
-        '/api/games/spin-wheel',
-        '/api/games/wheel-spin',
-        '/api/games/math-challenge',
-        '/api/games/stats/:userId'
+        '/api/stats'
     ];
     
     const isPublicEndpoint = publicEndpoints.some(endpoint => {
@@ -495,14 +490,13 @@ async function createUserInDB(userData) {
     try {
         await dbManager.waitForInitialization();
         const result = await dbManager.query(
-            `INSERT INTO bot_users (telegram_id, username, first_name, balance, earning_wallet, total_earned, game_tickets) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7) 
+            `INSERT INTO bot_users (telegram_id, username, first_name, balance, earning_wallet, total_earned) 
+             VALUES ($1, $2, $3, $4, $5, $6) 
              RETURNING *`,
             [
                 userData.telegram_id,
                 userData.username,
                 userData.first_name,
-                0,
                 0,
                 0,
                 0
@@ -620,9 +614,8 @@ app.post('/api/watch-ad', async (req, res) => {
         }
 
         const adReward = config.adValue;
-        const ticketReward = 1;
         
-        console.log(`💰 مكافأة الإعلان: ${adReward} TON + ${ticketReward} تذكرة`);
+        console.log(`💰 مكافأة الإعلان: ${adReward} TON`);
         
         const updateResult = await client.query(
             `UPDATE bot_users SET 
@@ -630,11 +623,10 @@ app.post('/api/watch-ad', async (req, res) => {
                 total_earned = COALESCE(total_earned, 0) + $1,
                 daily_ad_count = $2,
                 last_ad_date = CURRENT_DATE,
-                last_ad_timestamp = CURRENT_TIMESTAMP,
-                game_tickets = COALESCE(game_tickets, 0) + $3
-             WHERE telegram_id = $4 
+                last_ad_timestamp = CURRENT_TIMESTAMP
+             WHERE telegram_id = $3 
              RETURNING *`,
-            [adReward, dailyAdCount + 1, ticketReward, userId]
+            [adReward, dailyAdCount + 1, userId]
         );
 
         const updatedUser = updateResult.rows[0];
@@ -662,7 +654,7 @@ app.post('/api/watch-ad', async (req, res) => {
                     `, [userId, user.username || '', user.first_name || 'User']);
                 }
                 
-                console.log('✅ تمت مشاهدة الإعلان بنجاح + نقطة مسابقة واحدة + تذكرة لعبة');
+                console.log('✅ تمت مشاهدة الإعلان بنجاح + نقطة مسابقة واحدة');
             } catch (contestError) {
                 console.log('⚠️  خطأ في تحديث المسابقة:', contestError.message);
             }
@@ -684,8 +676,7 @@ app.post('/api/watch-ad', async (req, res) => {
                 dailyRemaining: config.dailyAdLimit - (dailyAdCount + 1),
                 totalEarned: parseFloat(updatedUser.total_earned || 0),
                 contestPoints: 1,
-                userRRBalance: Math.floor((parseFloat(updatedUser.earning_wallet || 0) * 10000000)),
-                gameTickets: parseInt(updatedUser.game_tickets || 0)
+                userRRBalance: Math.floor((parseFloat(updatedUser.earning_wallet || 0) * 10000000))
             });
         } else {
             await client.query('ROLLBACK');
@@ -778,7 +769,6 @@ app.get('/api/user/:userId', async (req, res) => {
                     earningWallet: parseFloat(user.earning_wallet || 0),
                     dailyAdCount: user.daily_ad_count || 0,
                     totalEarned: parseFloat(user.total_earned || 0),
-                    gameTickets: parseInt(user.game_tickets || 0),
                     userRRBalance: userRRBalance
                 },
                 isNewUser: isNewUser,
@@ -847,7 +837,6 @@ app.post('/api/register', async (req, res) => {
                     earningWallet: parseFloat(user.earning_wallet || 0),
                     dailyAdCount: user.daily_ad_count || 0,
                     totalEarned: parseFloat(user.total_earned || 0),
-                    gameTickets: parseInt(user.game_tickets || 0),
                     userRRBalance: userRRBalance
                 },
                 message: `مرحباً بعودتك ${user.first_name}!`
@@ -875,7 +864,6 @@ app.post('/api/register', async (req, res) => {
                     earningWallet: parseFloat(user.earning_wallet || 0),
                     dailyAdCount: user.daily_ad_count || 0,
                     totalEarned: parseFloat(user.total_earned || 0),
-                    gameTickets: parseInt(user.game_tickets || 0),
                     userRRBalance: 0
                 },
                 message: `🎉 أهلاً وسهلاً ${user.first_name}!`
@@ -981,7 +969,6 @@ app.post('/api/move-to-balance', async (req, res) => {
         });
     }
 });
-
 // 💳 طلب سحب - الإصدار المحسن والمصلح
 app.post('/api/withdraw', async (req, res) => {
     let client;
@@ -1184,484 +1171,6 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
         res.status(500).json({ 
             success: false,
             error: 'Failed to get withdrawal history' 
-        });
-    }
-});
-
-// 🎮 نظام الألعاب المحسن
-
-// 🎯 لعبة الأرقام المحسنة
-app.post('/api/games/number-challenge', async (req, res) => {
-    let client;
-    
-    try {
-        const { userId, score, timeLeft, initData } = req.body;
-
-        console.log(`🎮 معالجة لعبة الأرقام للمستخدم: ${userId}`, { score, timeLeft });
-
-        if (!validateTelegramInitData(initData)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'Invalid security signature' 
-            });
-        }
-
-        await dbManager.waitForInitialization();
-        client = await dbManager.connect();
-        await client.query('BEGIN');
-
-        const userResult = await client.query(
-            'SELECT * FROM bot_users WHERE telegram_id = $1 FOR UPDATE',
-            [userId]
-        );
-        
-        if (userResult.rows.length === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ 
-                success: false,
-                error: 'User not found' 
-            });
-        }
-
-        const user = userResult.rows[0];
-        const userTickets = parseInt(user.game_tickets || 0);
-        
-        if (userTickets < 1) {
-            await client.query('ROLLBACK');
-            return res.status(400).json({ 
-                success: false,
-                error: 'Not enough game tickets' 
-            });
-        }
-
-        await client.query(
-            'UPDATE bot_users SET game_tickets = game_tickets - 1 WHERE telegram_id = $1',
-            [userId]
-        );
-
-        let rewardRR = 0;
-        if (score === 9) {
-            rewardRR = Math.floor(Math.random() * 701) + 100;
-        } else if (score >= 5) {
-            rewardRR = Math.floor(Math.random() * 201) + 50;
-        } else {
-            rewardRR = Math.floor(Math.random() * 51) + 10;
-        }
-
-        const rewardTON = rewardRR / 10000000;
-
-        if (rewardRR > 0) {
-            await client.query(
-                `UPDATE bot_users SET 
-                    earning_wallet = COALESCE(earning_wallet, 0) + $1,
-                    total_earned = COALESCE(total_earned, 0) + $1
-                 WHERE telegram_id = $2`,
-                [rewardTON, userId]
-            );
-        }
-
-        await client.query(
-            `INSERT INTO game_results (user_id, game_type, score, reward, details)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [userId, 'number_challenge', score, rewardTON, JSON.stringify({ timeLeft, rewardRR })]
-        );
-
-        await client.query(`
-            INSERT INTO game_stats 
-            (user_id, total_games_played, total_rewards_earned, number_challenge_best_score, number_challenge_total_played, last_played)
-            VALUES ($1, 1, $2, $3, 1, CURRENT_TIMESTAMP)
-            ON CONFLICT (user_id) 
-            DO UPDATE SET 
-                total_games_played = game_stats.total_games_played + 1,
-                total_rewards_earned = game_stats.total_rewards_earned + $2,
-                number_challenge_best_score = GREATEST(game_stats.number_challenge_best_score, $3),
-                number_challenge_total_played = game_stats.number_challenge_total_played + 1,
-                last_played = EXCLUDED.last_played,
-                updated_at = CURRENT_TIMESTAMP
-        `, [userId, rewardTON, score]);
-
-        await client.query('COMMIT');
-
-        const updatedUserResult = await dbManager.query(
-            'SELECT * FROM bot_users WHERE telegram_id = $1',
-            [userId]
-        );
-
-        const updatedUser = updatedUserResult.rows[0];
-
-        console.log(`✅ تم معالجة لعبة الأرقام بنجاح للمستخدم: ${userId}`);
-
-        res.json({
-            success: true,
-            reward: rewardTON,
-            rewardRR: rewardRR,
-            userRRBalance: Math.floor((parseFloat(updatedUser.earning_wallet || 0) * 10000000)),
-            gameTickets: parseInt(updatedUser.game_tickets || 0),
-            message: rewardRR > 0 ? 
-                `🎯 أكملت ${score}/9! فزت بـ ${rewardRR} RR!` : 
-                '🎯 حاول مرة أخرى!'
-        });
-
-    } catch (error) {
-        if (client) {
-            await client.query('ROLLBACK');
-        }
-        console.error('❌ خطأ في معالجة لعبة الأرقام:', error);
-        res.status(500).json({ 
-            success: false,
-            error: 'Failed to process game result' 
-        });
-    } finally {
-        if (client) {
-            client.release();
-        }
-    }
-});
-
-// 🎡 لعبة عجلة الحظ المحسنة
-app.post('/api/games/wheel-spin', async (req, res) => {
-    let client;
-    
-    try {
-        const { userId, cost, initData } = req.body;
-
-        console.log(`🎡 طلب لعبة عجلة الحظ للمستخدم: ${userId}`);
-
-        if (!validateTelegramInitData(initData)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'Invalid security signature' 
-            });
-        }
-
-        await dbManager.waitForInitialization();
-        client = await dbManager.connect();
-        await client.query('BEGIN');
-
-        const userResult = await client.query(
-            'SELECT * FROM bot_users WHERE telegram_id = $1 FOR UPDATE',
-            [userId]
-        );
-        
-        if (userResult.rows.length === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ 
-                success: false,
-                error: 'User not found' 
-            });
-        }
-
-        const user = userResult.rows[0];
-        const userTickets = parseInt(user.game_tickets || 0);
-        
-        if (userTickets < cost) {
-            await client.query('ROLLBACK');
-            return res.status(400).json({ 
-                success: false,
-                error: 'Not enough game tickets' 
-            });
-        }
-
-        const wheelSegments = [
-            { type: 'win', amount: 800, probability: 5, label: '🎉 800 RR' },
-            { type: 'win', amount: 500, probability: 10, label: '🔥 500 RR' },
-            { type: 'win', amount: 300, probability: 15, label: '⭐ 300 RR' },
-            { type: 'win', amount: 200, probability: 20, label: '💎 200 RR' },
-            { type: 'win', amount: 150, probability: 25, label: '✨ 150 RR' },
-            { type: 'win', amount: 100, probability: 20, label: '🎯 100 RR' },
-            { type: 'lose', amount: 0, probability: 5, label: '💥 Game Over' }
-        ];
-
-        const randomValue = Math.random() * 100;
-        let accumulatedProbability = 0;
-        let result = wheelSegments[0];
-
-        for (const segment of wheelSegments) {
-            accumulatedProbability += segment.probability;
-            if (randomValue <= accumulatedProbability) {
-                result = segment;
-                break;
-            }
-        }
-
-        await client.query(
-            'UPDATE bot_users SET game_tickets = game_tickets - $1 WHERE telegram_id = $2',
-            [cost, userId]
-        );
-
-        let rewardRR = 0;
-        let message = '';
-
-        if (result.type === 'win') {
-            rewardRR = result.amount;
-            const rewardTON = rewardRR / 10000000;
-            
-            await client.query(
-                `UPDATE bot_users SET 
-                    earning_wallet = COALESCE(earning_wallet, 0) + $1,
-                    total_earned = COALESCE(total_earned, 0) + $1
-                 WHERE telegram_id = $2`,
-                [rewardTON, userId]
-            );
-
-            message = `🎉 فزت بـ ${rewardRR} RR!`;
-        } else {
-            message = '💥 للأسف خسرت هذه الجولة!';
-        }
-
-        await client.query(
-            `INSERT INTO game_results (user_id, game_type, score, reward, details)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [userId, 'wheel_spin', result.amount, rewardRR / 10000000, JSON.stringify(result)]
-        );
-
-        await client.query(`
-            INSERT INTO game_stats 
-            (user_id, total_games_played, total_rewards_earned, wheel_spin_total_played, wheel_spin_total_won, last_played)
-            VALUES ($1, 1, $2, 1, $3, CURRENT_TIMESTAMP)
-            ON CONFLICT (user_id) 
-            DO UPDATE SET 
-                total_games_played = game_stats.total_games_played + 1,
-                total_rewards_earned = game_stats.total_rewards_earned + $2,
-                wheel_spin_total_played = game_stats.wheel_spin_total_played + 1,
-                wheel_spin_total_won = game_stats.wheel_spin_total_won + $3,
-                last_played = EXCLUDED.last_played,
-                updated_at = CURRENT_TIMESTAMP
-        `, [userId, rewardRR / 10000000, rewardRR / 10000000]);
-
-        await client.query('COMMIT');
-
-        const updatedUserResult = await dbManager.query(
-            'SELECT * FROM bot_users WHERE telegram_id = $1',
-            [userId]
-        );
-
-        const updatedUser = updatedUserResult.rows[0];
-
-        console.log(`✅ تم معالجة لعبة العجلة بنجاح للمستخدم: ${userId}`);
-
-        res.json({
-            success: true,
-            result: result,
-            reward: rewardRR,
-            message: message,
-            userRRBalance: Math.floor((parseFloat(updatedUser.earning_wallet || 0) * 10000000)),
-            gameTickets: parseInt(updatedUser.game_tickets || 0)
-        });
-
-    } catch (error) {
-        if (client) {
-            await client.query('ROLLBACK');
-        }
-        console.error('❌ خطأ في لعبة العجلة:', error);
-        res.status(500).json({ 
-            success: false,
-            error: 'Failed to process wheel spin' 
-        });
-    } finally {
-        if (client) {
-            client.release();
-        }
-    }
-});
-
-// ➕ لعبة الجمع الرياضية
-app.post('/api/games/math-challenge', async (req, res) => {
-    let client;
-    
-    try {
-        const { userId, correctAnswers, totalQuestions, initData } = req.body;
-
-        console.log(`🧮 معالجة لعبة الجمع للمستخدم: ${userId}`, { correctAnswers, totalQuestions });
-
-        if (!validateTelegramInitData(initData)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'Invalid security signature' 
-            });
-        }
-
-        await dbManager.waitForInitialization();
-        client = await dbManager.connect();
-        await client.query('BEGIN');
-
-        const userResult = await client.query(
-            'SELECT * FROM bot_users WHERE telegram_id = $1 FOR UPDATE',
-            [userId]
-        );
-        
-        if (userResult.rows.length === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ 
-                success: false,
-                error: 'User not found' 
-            });
-        }
-
-        const user = userResult.rows[0];
-        const userTickets = parseInt(user.game_tickets || 0);
-        
-        if (userTickets < 1) {
-            await client.query('ROLLBACK');
-            return res.status(400).json({ 
-                success: false,
-                error: 'Not enough game tickets' 
-            });
-        }
-
-        await client.query(
-            'UPDATE bot_users SET game_tickets = game_tickets - 1 WHERE telegram_id = $1',
-            [userId]
-        );
-
-        let rewardRR = 0;
-        const successRate = correctAnswers / totalQuestions;
-
-        if (successRate === 1) {
-            rewardRR = Math.floor(Math.random() * 701) + 100;
-        } else if (successRate >= 0.7) {
-            rewardRR = Math.floor(Math.random() * 301) + 100;
-        } else if (successRate >= 0.5) {
-            rewardRR = Math.floor(Math.random() * 151) + 50;
-        } else {
-            rewardRR = Math.floor(Math.random() * 51) + 10;
-        }
-
-        const rewardTON = rewardRR / 10000000;
-
-        if (rewardRR > 0) {
-            await client.query(
-                `UPDATE bot_users SET 
-                    earning_wallet = COALESCE(earning_wallet, 0) + $1,
-                    total_earned = COALESCE(total_earned, 0) + $1
-                 WHERE telegram_id = $2`,
-                [rewardTON, userId]
-            );
-        }
-
-        await client.query(
-            `INSERT INTO game_results (user_id, game_type, score, reward, details)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [userId, 'math_challenge', correctAnswers, rewardTON, 
-             JSON.stringify({ totalQuestions, successRate, rewardRR })]
-        );
-
-        await client.query(`
-            INSERT INTO game_stats 
-            (user_id, total_games_played, total_rewards_earned, math_challenge_best_score, math_challenge_total_played, last_played)
-            VALUES ($1, 1, $2, $3, 1, CURRENT_TIMESTAMP)
-            ON CONFLICT (user_id) 
-            DO UPDATE SET 
-                total_games_played = game_stats.total_games_played + 1,
-                total_rewards_earned = game_stats.total_rewards_earned + $2,
-                math_challenge_best_score = GREATEST(game_stats.math_challenge_best_score, $3),
-                math_challenge_total_played = game_stats.math_challenge_total_played + 1,
-                last_played = EXCLUDED.last_played,
-                updated_at = CURRENT_TIMESTAMP
-        `, [userId, rewardTON, correctAnswers]);
-
-        await client.query('COMMIT');
-
-        const updatedUserResult = await dbManager.query(
-            'SELECT * FROM bot_users WHERE telegram_id = $1',
-            [userId]
-        );
-
-        const updatedUser = updatedUserResult.rows[0];
-
-        console.log(`✅ تم معالجة لعبة الجمع بنجاح للمستخدم: ${userId}`);
-
-        res.json({
-            success: true,
-            reward: rewardTON,
-            rewardRR: rewardRR,
-            userRRBalance: Math.floor((parseFloat(updatedUser.earning_wallet || 0) * 10000000)),
-            gameTickets: parseInt(updatedUser.game_tickets || 0),
-            message: `🧮 أجبت على ${correctAnswers}/${totalQuestions} بشكل صحيح! فزت بـ ${rewardRR} RR!`
-        });
-
-    } catch (error) {
-        if (client) {
-            await client.query('ROLLBACK');
-        }
-        console.error('❌ خطأ في معالجة لعبة الجمع:', error);
-        res.status(500).json({ 
-            success: false,
-            error: 'Failed to process math challenge' 
-        });
-    } finally {
-        if (client) {
-            client.release();
-        }
-    }
-});
-
-// 📊 جلب إحصائيات الألعاب
-app.get('/api/games/stats/:userId', async (req, res) => {
-    try {
-        const userId = req.params.userId;
-        const initData = req.query.initData;
-
-        console.log(`📊 طلب إحصائيات الألعاب للمستخدم: ${userId}`);
-
-        if (!validateTelegramInitData(initData)) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'Invalid security signature' 
-            });
-        }
-
-        const statsResult = await dbManager.query(
-            'SELECT * FROM game_stats WHERE user_id = $1',
-            [userId]
-        );
-
-        const recentGamesResult = await dbManager.query(
-            `SELECT game_type, score, reward, created_at 
-             FROM game_results 
-             WHERE user_id = $1 
-             ORDER BY created_at DESC 
-             LIMIT 10`,
-            [userId]
-        );
-
-        const gameStats = statsResult.rows[0] || {
-            total_games_played: 0,
-            total_rewards_earned: 0,
-            number_challenge_best_score: 0,
-            number_challenge_total_played: 0,
-            wheel_spin_total_played: 0,
-            wheel_spin_total_won: 0,
-            math_challenge_best_score: 0,
-            math_challenge_total_played: 0
-        };
-
-        res.json({
-            success: true,
-            stats: {
-                totalGamesPlayed: gameStats.total_games_played || 0,
-                totalRewardsEarned: parseFloat(gameStats.total_rewards_earned || 0),
-                numberChallenge: {
-                    bestScore: gameStats.number_challenge_best_score || 0,
-                    totalPlayed: gameStats.number_challenge_total_played || 0
-                },
-                wheelSpin: {
-                    totalSpins: gameStats.wheel_spin_total_played || 0,
-                    totalWon: parseFloat(gameStats.wheel_spin_total_won || 0)
-                },
-                mathChallenge: {
-                    bestScore: gameStats.math_challenge_best_score || 0,
-                    totalPlayed: gameStats.math_challenge_total_played || 0
-                }
-            },
-            recentGames: recentGamesResult.rows
-        });
-
-    } catch (error) {
-        console.error('❌ خطأ في جلب إحصائيات الألعاب:', error);
-        res.status(500).json({ 
-            success: false,
-            error: 'Failed to get game stats' 
         });
     }
 });
@@ -1919,8 +1428,6 @@ app.get('/api/check-tables', async (req, res) => {
             'contest_leaderboard',
             'reward_codes',
             'code_redemptions',
-            'game_results',
-            'game_stats',
             'referrals'
         ];
         
@@ -1977,7 +1484,6 @@ app.get('/api/setup-database', async (req, res) => {
                 last_ad_timestamp TIMESTAMP,
                 referral_code VARCHAR(50) UNIQUE,
                 referred_by BIGINT,
-                game_tickets INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -2013,38 +1519,6 @@ app.get('/api/setup-database', async (req, res) => {
             )
         `);
         console.log('✅ جدول contest_leaderboard جاهز');
-
-        await dbManager.query(`
-            CREATE TABLE IF NOT EXISTS game_results (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                game_type VARCHAR(50) NOT NULL,
-                score INTEGER DEFAULT 0,
-                reward DECIMAL(15,8) DEFAULT 0,
-                details JSONB,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ جدول game_results جاهز');
-
-        await dbManager.query(`
-            CREATE TABLE IF NOT EXISTS game_stats (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT UNIQUE NOT NULL,
-                total_games_played INTEGER DEFAULT 0,
-                total_rewards_earned DECIMAL(15,8) DEFAULT 0,
-                number_challenge_best_score INTEGER DEFAULT 0,
-                number_challenge_total_played INTEGER DEFAULT 0,
-                wheel_spin_total_played INTEGER DEFAULT 0,
-                wheel_spin_total_won DECIMAL(15,8) DEFAULT 0,
-                math_challenge_best_score INTEGER DEFAULT 0,
-                math_challenge_total_played INTEGER DEFAULT 0,
-                last_played TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ جدول game_stats جاهز');
 
         await dbManager.query(`
             CREATE TABLE IF NOT EXISTS referrals (
@@ -2164,7 +1638,7 @@ setTimeout(() => {
         console.log(`🔐 Telegram verification: ENABLED`);
         console.log(`🔄 Dynamic token system: ACTIVE (9 seconds)`);
         console.log(`🗄️ Database manager: ${dbManager.initialized ? 'ACTIVE' : 'INITIALIZING'}`);
-        console.log(`🎮 Games system: ENABLED`);
+        console.log(`🎮 Games system: DISABLED (Removed)`);
         
         checkDatabaseConnection();
         
@@ -2184,44 +1658,11 @@ setTimeout(() => {
                         last_ad_timestamp TIMESTAMP,
                         referral_code VARCHAR(50) UNIQUE,
                         referred_by BIGINT,
-                        game_tickets INTEGER DEFAULT 0,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 `);
                 console.log('✅ جدول bot_users جاهز');
-                
-                await dbManager.query(`
-                    CREATE TABLE IF NOT EXISTS game_results (
-                        id SERIAL PRIMARY KEY,
-                        user_id BIGINT NOT NULL,
-                        game_type VARCHAR(50) NOT NULL,
-                        score INTEGER DEFAULT 0,
-                        reward DECIMAL(15,8) DEFAULT 0,
-                        details JSONB,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                `);
-                console.log('✅ جدول game_results جاهز');
-
-                await dbManager.query(`
-                    CREATE TABLE IF NOT EXISTS game_stats (
-                        id SERIAL PRIMARY KEY,
-                        user_id BIGINT UNIQUE NOT NULL,
-                        total_games_played INTEGER DEFAULT 0,
-                        total_rewards_earned DECIMAL(15,8) DEFAULT 0,
-                        number_challenge_best_score INTEGER DEFAULT 0,
-                        number_challenge_total_played INTEGER DEFAULT 0,
-                        wheel_spin_total_played INTEGER DEFAULT 0,
-                        wheel_spin_total_won DECIMAL(15,8) DEFAULT 0,
-                        math_challenge_best_score INTEGER DEFAULT 0,
-                        math_challenge_total_played INTEGER DEFAULT 0,
-                        last_played TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                `);
-                console.log('✅ جدول game_stats جاهز');
                 
             } catch (error) {
                 console.log('⚠️  خطأ في إنشاء الجداول:', error.message);
