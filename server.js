@@ -194,7 +194,7 @@ const config = {
     minimumWithdrawReferrals: 0
 };
 
-// 🛡️ نظام البصمة الرقمية المتقدم مع منع تعدد الحسابات
+// 🛡️ نظام البصمة الرقمية المتقدم
 class AdvancedDeviceFingerprint {
     constructor() {
         this.deviceUsers = new Map();
@@ -202,9 +202,6 @@ class AdvancedDeviceFingerprint {
         this.deviceProfiles = new Map();
         this.bannedDevices = new Map();
         this.suspiciousActivities = new Map();
-        this.deviceCreationTime = new Map();
-        this.deviceRequestCount = new Map();
-        this.lastDeviceCleanup = Date.now();
     }
 
     generateDeviceFingerprint(req, initData) {
@@ -214,7 +211,7 @@ class AdvancedDeviceFingerprint {
             acceptEncoding: req.headers['accept-encoding'] || '',
             ip: this.extractIP(req),
             xForwardedFor: req.headers['x-forwarded-for'] || '',
-            telegramInitData: initData ? this.hashInitData(initData) : '',
+            telegramInitData: initData ? initData.substring(0, 50) : '',
             timestamp: Date.now()
         };
 
@@ -225,82 +222,42 @@ class AdvancedDeviceFingerprint {
             .substring(0, 32);
     }
 
-    hashInitData(initData) {
-        return crypto
-            .createHash('sha256')
-            .update(initData)
-            .digest('hex')
-            .substring(0, 16);
-    }
-
     extractIP(req) {
-        let ip = req.headers['x-forwarded-for'] || 
-                req.headers['x-real-ip'] || 
-                req.connection.remoteAddress || 
-                req.socket.remoteAddress;
-        
-        if (ip && ip.includes(',')) {
-            ip = ip.split(',')[0].trim();
-        }
-        
-        if (ip && ip.includes('::ffff:')) {
-            ip = ip.replace('::ffff:', '');
-        }
-        
-        return ip;
+        return req.headers['x-forwarded-for'] || 
+               req.headers['x-real-ip'] || 
+               req.connection.remoteAddress || 
+               req.socket.remoteAddress;
     }
 
-    validateDeviceUser(req, initData, userId) {
+    validateDeviceUser(req, initData) {
         try {
             const deviceHash = this.generateDeviceFingerprint(req, initData);
-            
+            const telegramUser = parseTelegramUser(initData);
+            const userId = telegramUser?.id?.toString();
+
             if (!userId) {
                 return { success: false, error: 'Invalid user data' };
             }
 
-            // تنظيف البيانات القديمة كل ساعة
-            this.cleanupOldData();
-
             // التحقق من حظر الجهاز
             if (this.isDeviceBanned(deviceHash)) {
-                const banInfo = this.bannedDevices.get(deviceHash);
                 return { 
                     success: false, 
                     error: 'Device banned',
-                    banReason: banInfo.reason,
-                    banExpires: banInfo.expiresAt
+                    banReason: 'multiple_accounts'
                 };
             }
 
             // التحقق من تعدد الحسابات على نفس الجهاز
             const existingUser = this.deviceUsers.get(deviceHash);
             if (existingUser && existingUser !== userId) {
-                console.log(`🚫 كشف تعدد حسابات: الجهاز ${deviceHash} - المستخدم الحالي: ${userId} - المستخدم السابق: ${existingUser}`);
-                
-                // تسجيل النشاط المشبوه
-                this.recordSuspiciousActivity(deviceHash, 'multiple_accounts_detected', {
-                    existingUser: existingUser,
-                    newUser: userId,
-                    timestamp: Date.now()
-                });
-
-                // حظر الجهاز فوراً
-                this.banDevice(deviceHash, 'multiple_accounts', 30 * 24 * 60 * 60 * 1000); // 30 يوم
-                
+                this.banDevice(deviceHash, 'multiple_accounts', 30 * 24 * 60 * 60 * 1000);
                 return { 
                     success: false, 
-                    error: 'Multiple accounts detected - One device per user only',
+                    error: 'Multiple accounts detected',
                     banReason: 'multiple_accounts'
                 };
             }
-
-            // تسجيل وقت إنشاء الجهاز إذا كان جديداً
-            if (!this.deviceCreationTime.has(deviceHash)) {
-                this.deviceCreationTime.set(deviceHash, Date.now());
-            }
-
-            // تحديث عداد الطلبات
-            this.deviceRequestCount.set(deviceHash, (this.deviceRequestCount.get(deviceHash) || 0) + 1);
 
             // تسجيل الجهاز للمستخدم
             this.deviceUsers.set(deviceHash, userId);
@@ -318,26 +275,6 @@ class AdvancedDeviceFingerprint {
         } catch (error) {
             console.error('❌ خطأ في التحقق من الجهاز:', error);
             return { success: false, error: 'Device validation failed' };
-        }
-    }
-
-    cleanupOldData() {
-        const now = Date.now();
-        const ONE_HOUR = 60 * 60 * 1000;
-        
-        if (now - this.lastDeviceCleanup > ONE_HOUR) {
-            console.log('🧹 تنظيف بيانات الأجهزة القديمة...');
-            
-            // تنظيف الأجهزة التي لم تستخدم منذ أكثر من 24 ساعة
-            for (let [deviceHash, lastSeen] of this.deviceProfiles) {
-                if (now - lastSeen.lastSeen > 24 * 60 * 60 * 1000) {
-                    this.deviceUsers.delete(deviceHash);
-                    this.deviceProfiles.delete(deviceHash);
-                    this.deviceRequestCount.delete(deviceHash);
-                }
-            }
-            
-            this.lastDeviceCleanup = now;
         }
     }
 
@@ -370,8 +307,7 @@ class AdvancedDeviceFingerprint {
             firstSeen: Date.now(),
             requestCount: 0,
             lastSeen: Date.now(),
-            userAgent: req.headers['user-agent'],
-            ip: this.extractIP(req)
+            userAgent: req.headers['user-agent']
         };
 
         profile.requestCount++;
@@ -402,15 +338,6 @@ class AdvancedDeviceFingerprint {
         }
 
         console.log(`⚠️  نشاط مشبوه مسجل: ${activityType} للجهاز ${deviceHash}`);
-    }
-
-    getDeviceStats() {
-        return {
-            totalDevices: this.deviceUsers.size,
-            bannedDevices: this.bannedDevices.size,
-            deviceProfiles: this.deviceProfiles.size,
-            suspiciousActivities: this.suspiciousActivities.size
-        };
     }
 }
 
@@ -567,106 +494,38 @@ class RequestErrorMonitor {
     }
 }
 
-// 🔒 نظام التحقق من التليجرام فقط - محسن
+// 🔒 نظام التحقق من التليجرام فقط
 class TelegramOnlyEnforcer {
     constructor() {
         this.allowedUserAgents = [
             'TelegramBot',
             'Mozilla/5.0 (iPhone; CPU iPhone OS',
             'Mozilla/5.0 (Android; Mobile;',
-            'Mozilla/5.0 (Linux; Android',
-            'Telegram iOS',
-            'Telegram Android'
-        ];
-        
-        this.allowedOrigins = [
-            'web.telegram.org',
-            'telegram.org',
-            't.me'
-        ];
-        
-        this.allowedReferrers = [
-            'https://web.telegram.org/',
-            'https://t.me/',
-            'https://telegram.org/'
+            'Mozilla/5.0 (Linux; Android'
         ];
     }
 
     validateTelegramOrigin(req) {
         const userAgent = req.headers['user-agent'] || '';
-        const origin = req.headers['origin'] || '';
-        const referer = req.headers['referer'] || '';
-        
-        // التحقق من User-Agent
+        const origin = req.headers['origin'] || req.headers['referer'] || '';
+
         const isTelegramUserAgent = this.allowedUserAgents.some(agent => 
             userAgent.includes(agent)
         );
 
-        // التحقق من Origin
-        const isTelegramOrigin = this.allowedOrigins.some(allowedOrigin => 
-            origin.includes(allowedOrigin)
-        );
+        const isTelegramOrigin = origin.includes('web.telegram.org') || 
+                                origin.includes('telegram.org');
 
-        // التحقق من Referer
-        const isTelegramReferer = this.allowedReferrers.some(allowedReferer => 
-            referer.includes(allowedReferer)
-        );
-
-        // يجب أن يكون الطلب من Telegram
-        const isFromTelegram = isTelegramUserAgent && (isTelegramOrigin || isTelegramReferer);
-
-        if (!isFromTelegram) {
-            console.log('🚫 محاولة دخول من خارج التليجرام:', { 
-                userAgent: userAgent.substring(0, 100),
-                origin,
-                referer,
-                ip: req.headers['x-forwarded-for'] || req.connection.remoteAddress
-            });
-            
-            // تسجيل النشاط المشبوه
-            deviceFingerprint.recordSuspiciousActivity(
-                deviceFingerprint.generateDeviceFingerprint(req, ''),
-                'non_telegram_access_attempt',
-                { userAgent, origin, referer }
-            );
-            
+        if (!isTelegramUserAgent && !isTelegramOrigin) {
+            console.log('🚫 محاولة دخول من خارج التليجرام:', { userAgent, origin });
             return false;
         }
 
         return true;
     }
-
-    // تحقق إضافي لـ initData
-    validateTelegramInitData(initData) {
-        if (!initData) {
-            return false;
-        }
-
-        try {
-            const decodedInitData = decodeURIComponent(initData);
-            const parsedData = querystring.parse(decodedInitData);
-            
-            // يجب أن يحتوي initData على بيانات المستخدم من Telegram
-            if (!parsedData.user) {
-                return false;
-            }
-
-            const userData = JSON.parse(parsedData.user);
-            
-            // التحقق من وجود البيانات الأساسية
-            if (!userData.id || !userData.first_name) {
-                return false;
-            }
-
-            return true;
-        } catch (error) {
-            console.error('❌ خطأ في تحليل initData:', error);
-            return false;
-        }
-    }
 }
 
-// 🔧 نظام التوكن الديناميكي
+// 🔧 نظام التوكن الديناميكي - معدل
 class DynamicTokenSystem {
     constructor() {
         this.tokens = new Map();
@@ -676,9 +535,9 @@ class DynamicTokenSystem {
         this.intervalId = null;
         
         this.config = {
-            tokenRefreshInterval: 9000,
-            tokenValidityWindow: 25000,
-            maxTokens: 20,
+            tokenRefreshInterval: 30000, // ⬅️ زيادة إلى 30 ثانية
+            tokenValidityWindow: 60000,  // ⬅️ زيادة إلى 60 ثانية
+            maxTokens: 50,
             secretKey: process.env.TOKEN_SECRET || 'ton-rewards-dynamic-token-secret-2024'
         };
     }
@@ -755,6 +614,12 @@ class DynamicTokenSystem {
             return false;
         }
 
+        // 🔒 تحقق إضافي من تنسيق التوكن
+        if (!/^[a-f0-9]{64}$/.test(token)) {
+            console.log('❌ توكن غير صالح - تنسيق خاطئ');
+            return false;
+        }
+
         const tokenData = this.tokens.get(token);
         if (!tokenData) {
             console.log('❌ توكن غير معترف به');
@@ -773,15 +638,15 @@ class DynamicTokenSystem {
     }
 
     getCurrentToken() {
-        return this.currentToken;
+        return this.currentToken; // 🔒 داخلي فقط
     }
 
     getStats() {
         return {
-            currentToken: this.currentToken ? this.currentToken.substring(0, 20) + '...' : null,
             activeTokens: this.tokens.size,
             totalGenerated: this.tokenCounter,
             refreshInterval: this.config.tokenRefreshInterval
+            // 🔒 إزالة currentToken من الإحصائيات
         };
     }
 
@@ -853,12 +718,10 @@ const tokenSystem = new DynamicTokenSystem();
 const geolocationSystem = new GeoLocationSystem();
 tokenSystem.start();
 
-// 🔧 middleware محسن للتحقق من التوكن والحماية
+// 🔧 middleware محسن للتحقق من التوكن والحماية - معدل
 const advancedSecurityMiddleware = (req, res, next) => {
     const publicEndpoints = [
         '/', 
-        '/api/token/current', 
-        '/api/token/stats', 
         '/api/check-tables', 
         '/api/setup-database', 
         '/api/config',
@@ -879,7 +742,9 @@ const advancedSecurityMiddleware = (req, res, next) => {
         '/api/contest/user/:userId',
         '/api/validate-initdata',
         '/api/stats',
-        '/api/security/status'
+        '/api/security/status',
+        '/api/geolocation/detect'
+        // 🔒 إزالة endpoints التوكن من هنا
     ];
     
     const isPublicEndpoint = publicEndpoints.some(endpoint => {
@@ -894,7 +759,7 @@ const advancedSecurityMiddleware = (req, res, next) => {
         return next();
     }
 
-    // 1. التحقق من التليجرام فقط - إجباري لجميع الطلبات
+    // 1. التحقق من التليجرام فقط
     if (!telegramEnforcer.validateTelegramOrigin(req)) {
         return res.status(403).json({ 
             success: false,
@@ -941,20 +806,7 @@ const advancedSecurityMiddleware = (req, res, next) => {
 
     // 4. التحقق من initData لطلبات POST
     if (req.method === 'POST' && req.body && req.body.initData) {
-        // التحقق من صحة initData
-        if (!telegramEnforcer.validateTelegramInitData(req.body.initData)) {
-            return res.status(403).json({ 
-                success: false,
-                error: 'Invalid Telegram initData',
-                code: 'INVALID_TELEGRAM_DATA'
-            });
-        }
-
-        const telegramUser = parseTelegramUser(req.body.initData);
-        const userId = telegramUser?.id?.toString();
-
-        // التحقق من منع تعدد الحسابات
-        const deviceValidation = deviceFingerprint.validateDeviceUser(req, req.body.initData, userId);
+        const deviceValidation = deviceFingerprint.validateDeviceUser(req, req.body.initData);
         if (!deviceValidation.success) {
             return res.status(403).json({ 
                 success: false,
@@ -968,7 +820,7 @@ const advancedSecurityMiddleware = (req, res, next) => {
         const requestAnalysis = requestMonitor.analyzeRequest(req);
         if (requestAnalysis.isSuspicious) {
             requestMonitor.recordError(
-                userId, 
+                deviceValidation.userId, 
                 deviceValidation.deviceHash, 
                 'suspicious_request', 
                 requestAnalysis
@@ -1145,17 +997,6 @@ app.post('/api/watch-ad', async (req, res) => {
         const userId = telegramUser.id.toString();
         console.log(`👤 معالجة مشاهدة إعلان للمستخدم: ${userId}`);
         
-        // التحقق النهائي من منع تعدد الحسابات
-        const deviceValidation = deviceFingerprint.validateDeviceUser(req, initData, userId);
-        if (!deviceValidation.success) {
-            return res.status(403).json({ 
-                success: false,
-                error: deviceValidation.error,
-                code: 'DEVICE_VALIDATION_FAILED',
-                banReason: deviceValidation.banReason
-            });
-        }
-        
         await dbManager.waitForInitialization();
         client = await dbManager.connect();
         await client.query('BEGIN');
@@ -1318,17 +1159,6 @@ app.get('/api/user/:userId', async (req, res) => {
             const telegramUser = parseTelegramUser(initData);
             
             if (telegramUser?.id) {
-                // التحقق من منع تعدد الحسابات قبل التسجيل
-                const deviceValidation = deviceFingerprint.validateDeviceUser(req, initData, telegramUser.id.toString());
-                if (!deviceValidation.success) {
-                    return res.status(403).json({ 
-                        success: false,
-                        error: deviceValidation.error,
-                        code: 'DEVICE_VALIDATION_FAILED',
-                        banReason: deviceValidation.banReason
-                    });
-                }
-
                 const newUser = {
                     telegram_id: telegramUser.id.toString(),
                     username: telegramUser.username || '',
@@ -1343,17 +1173,6 @@ app.get('/api/user/:userId', async (req, res) => {
                 } else {
                     console.log('❌ فشل في التسجيل التلقائي');
                 }
-            }
-        } else {
-            // التحقق من منع تعدد الحسابات للمستخدمين الحاليين
-            const deviceValidation = deviceFingerprint.validateDeviceUser(req, initData, userId);
-            if (!deviceValidation.success) {
-                return res.status(403).json({ 
-                    success: false,
-                    error: deviceValidation.error,
-                    code: 'DEVICE_VALIDATION_FAILED',
-                    banReason: deviceValidation.banReason
-                });
             }
         }
 
@@ -1422,17 +1241,6 @@ app.post('/api/register', async (req, res) => {
 
         const userId = telegramUser.id.toString();
         console.log(`👤 معالجة المستخدم: ${userId}`);
-        
-        // التحقق من منع تعدد الحسابات قبل التسجيل
-        const deviceValidation = deviceFingerprint.validateDeviceUser(req, initData, userId);
-        if (!deviceValidation.success) {
-            return res.status(403).json({ 
-                success: false,
-                error: deviceValidation.error,
-                code: 'DEVICE_VALIDATION_FAILED',
-                banReason: deviceValidation.banReason
-            });
-        }
         
         let user = await getUserFromDB(userId);
         
@@ -1528,17 +1336,6 @@ app.post('/api/move-to-balance', async (req, res) => {
         const userId = telegramUser.id.toString();
         console.log(`👤 معالجة تحويل الرصيد للمستخدم: ${userId}`);
         
-        // التحقق من منع تعدد الحسابات
-        const deviceValidation = deviceFingerprint.validateDeviceUser(req, initData, userId);
-        if (!deviceValidation.success) {
-            return res.status(403).json({ 
-                success: false,
-                error: deviceValidation.error,
-                code: 'DEVICE_VALIDATION_FAILED',
-                banReason: deviceValidation.banReason
-            });
-        }
-        
         const user = await getUserFromDB(userId);
         
         if (!user) {
@@ -1632,17 +1429,6 @@ app.post('/api/withdraw', async (req, res) => {
 
         const userId = telegramUser.id.toString();
         console.log(`👤 معالجة سحب للمستخدم: ${userId}`);
-        
-        // التحقق من منع تعدد الحسابات
-        const deviceValidation = deviceFingerprint.validateDeviceUser(req, initData, userId);
-        if (!deviceValidation.success) {
-            return res.status(403).json({ 
-                success: false,
-                error: deviceValidation.error,
-                code: 'DEVICE_VALIDATION_FAILED',
-                banReason: deviceValidation.banReason
-            });
-        }
         
         await dbManager.waitForInitialization();
         client = await dbManager.connect();
@@ -1758,17 +1544,6 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
         }
 
         console.log('✅ تم التحقق بنجاح - متابعة الطلب');
-        
-        // التحقق من منع تعدد الحسابات
-        const deviceValidation = deviceFingerprint.validateDeviceUser(req, initData, userId);
-        if (!deviceValidation.success) {
-            return res.status(403).json({ 
-                success: false,
-                error: deviceValidation.error,
-                code: 'DEVICE_VALIDATION_FAILED',
-                banReason: deviceValidation.banReason
-            });
-        }
         
         const withdrawals = await dbManager.query(
             `SELECT 
@@ -2102,7 +1877,12 @@ app.get('/api/security/status', async (req, res) => {
         res.json({
             success: true,
             security: {
-                deviceFingerprint: deviceFingerprint.getDeviceStats(),
+                deviceFingerprint: {
+                    totalDevices: deviceFingerprint.deviceUsers.size,
+                    bannedDevices: deviceFingerprint.bannedDevices.size,
+                    deviceProfiles: deviceFingerprint.deviceProfiles.size,
+                    suspiciousActivities: deviceFingerprint.suspiciousActivities.size
+                },
                 requestMonitor: {
                     userErrors: requestMonitor.userErrors.size,
                     deviceErrors: requestMonitor.deviceErrors.size,
@@ -2315,7 +2095,11 @@ app.get('/api/health', async (req, res) => {
             timestamp: new Date().toISOString(),
             database: dbStatus ? 'connected' : 'disconnected',
             tokenSystem: tokenStats,
-            security: deviceFingerprint.getDeviceStats(),
+            security: {
+                deviceFingerprint: deviceFingerprint.deviceUsers.size,
+                bannedDevices: deviceFingerprint.bannedDevices.size,
+                requestMonitor: requestMonitor.userErrors.size
+            },
             uptime: process.uptime()
         });
     } catch (error) {
@@ -2328,20 +2112,7 @@ app.get('/api/health', async (req, res) => {
 });
 
 // 🔧 endpoints إضافية للتحكم
-app.get('/api/token/current', (req, res) => {
-    res.json({
-        success: true,
-        token: tokenSystem.getCurrentToken(),
-        stats: tokenSystem.getStats()
-    });
-});
-
-app.get('/api/token/stats', (req, res) => {
-    res.json({
-        success: true,
-        stats: tokenSystem.getStats()
-    });
-});
+// 🔒 إزالة endpoints التوكن من الوصول العام
 
 app.get('/api/config', (req, res) => {
     res.json({
@@ -2372,7 +2143,21 @@ app.get('/api/database/status', async (req, res) => {
 app.get('/api/security/status', (req, res) => {
     res.json({
         success: true,
-        security: deviceFingerprint.getDeviceStats()
+        security: {
+            deviceFingerprint: {
+                totalDevices: deviceFingerprint.deviceUsers.size,
+                bannedDevices: deviceFingerprint.bannedDevices.size
+            },
+            requestMonitor: {
+                userErrors: requestMonitor.userErrors.size,
+                deviceErrors: requestMonitor.deviceErrors.size
+            },
+            telegramEnforcer: 'active',
+            tokenSystem: tokenSystem.getStats(),
+            geolocation: {
+                bannedCountries: geolocationSystem.getBannedCountries()
+            }
+        }
     });
 });
 
@@ -2402,7 +2187,7 @@ setTimeout(() => {
         console.log(`👥 Referral bonus: ${config.referralBonus} TON`);
         console.log(`🏆 Contest points per ad: ${config.contestAdPoints}`);
         console.log(`🔐 Telegram verification: ENABLED`);
-        console.log(`🔄 Dynamic token system: ACTIVE (9 seconds)`);
+        console.log(`🔄 Dynamic token system: ACTIVE (30 seconds)`);
         console.log(`🗄️ Database manager: ${dbManager.initialized ? 'ACTIVE' : 'INITIALIZING'}`);
         console.log(`🛡️ Advanced Security: ENABLED`);
         console.log(`   ├─ Device Fingerprinting: ACTIVE`);
