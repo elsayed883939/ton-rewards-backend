@@ -194,42 +194,24 @@ const config = {
     minimumWithdrawReferrals: 0
 };
 
-// 🔒 نظام الحماية المتقدم
-class AdvancedSecuritySystem {
+// 🛡️ نظام البصمة الرقمية المتقدم
+class AdvancedDeviceFingerprint {
     constructor() {
-        this.deviceUsers = new Map(); // deviceHash -> userId
-        this.bannedDevices = new Map(); // deviceHash -> banInfo
-        this.suspiciousActivities = new Map(); // deviceHash -> activities
-        this.requestHistory = new Map(); // deviceHash -> requests
-        this.failedAttempts = new Map(); // deviceHash -> count
-        
-        this.config = {
-            maxAccountsPerDevice: 1, // حساب واحد فقط لكل جهاز
-            maxFailedAttempts: 5, // 5 محاولات فاشلة ثم حظر
-            banDuration: 30 * 24 * 60 * 60 * 1000, // 30 يوم
-            requestWindow: 60000, // 1 دقيقة
-            maxRequestsPerMinute: 60,
-            suspiciousPatterns: [
-                /sql.*injection|drop.*table|union.*select/i,
-                /<script>|javascript:|onclick=|onload=/i,
-                /eval\(|setTimeout\(|setInterval\(/i,
-                /\.\.\/|\.\.\\/i,
-                /bin\/sh|cmd\.exe|powershell/i,
-                /python-requests|node-fetch|axios/i,
-                /bot|scraper|crawler|spider/i
-            ]
-        };
+        this.deviceUsers = new Map();
+        this.userDevices = new Map();
+        this.deviceProfiles = new Map();
+        this.bannedDevices = new Map();
+        this.suspiciousActivities = new Map();
     }
 
-    // 🔍 توليد بصمة جهاز فريدة
-    generateDeviceFingerprint(req, initData = '') {
+    generateDeviceFingerprint(req, initData) {
         const fingerprintData = {
             userAgent: req.headers['user-agent'] || '',
             acceptLanguage: req.headers['accept-language'] || '',
             acceptEncoding: req.headers['accept-encoding'] || '',
             ip: this.extractIP(req),
-            platform: this.detectPlatform(req),
-            telegramData: initData ? crypto.createHash('md5').update(initData).digest('hex') : '',
+            xForwardedFor: req.headers['x-forwarded-for'] || '',
+            telegramInitData: initData ? initData.substring(0, 50) : '',
             timestamp: Date.now()
         };
 
@@ -240,86 +222,49 @@ class AdvancedSecuritySystem {
             .substring(0, 32);
     }
 
-    // 🌐 استخراج IP حقيقي
     extractIP(req) {
-        return req.headers['x-forwarded-for']?.split(',')[0] || 
+        return req.headers['x-forwarded-for'] || 
                req.headers['x-real-ip'] || 
                req.connection.remoteAddress || 
-               req.socket.remoteAddress ||
-               'unknown';
+               req.socket.remoteAddress;
     }
 
-    // 📱 كشف نظام التشغيل
-    detectPlatform(req) {
-        const ua = req.headers['user-agent'] || '';
-        if (ua.includes('Android')) return 'android';
-        if (ua.includes('iPhone') || ua.includes('iPad')) return 'ios';
-        if (ua.includes('Windows')) return 'windows';
-        if (ua.includes('Mac')) return 'mac';
-        if (ua.includes('Linux')) return 'linux';
-        return 'unknown';
-    }
-
-    // 🛡️ التحقق من الجهاز والمستخدم - الحماية الأساسية
-    validateDeviceAndUser(req, initData) {
+    validateDeviceUser(req, initData) {
         try {
             const deviceHash = this.generateDeviceFingerprint(req, initData);
-            const telegramUser = this.parseTelegramUser(initData);
+            const telegramUser = parseTelegramUser(initData);
             const userId = telegramUser?.id?.toString();
 
             if (!userId) {
-                return { success: false, error: 'بيانات المستخدم غير صالحة' };
+                return { success: false, error: 'Invalid user data' };
             }
 
-            // 1. التحقق من حظر الجهاز
+            // التحقق من حظر الجهاز
             if (this.isDeviceBanned(deviceHash)) {
-                const banInfo = this.bannedDevices.get(deviceHash);
                 return { 
                     success: false, 
-                    error: `🚫 الجهاز محظر: ${banInfo.reason}`,
-                    banReason: banInfo.reason,
-                    banned: true
+                    error: 'Device banned',
+                    banReason: 'multiple_accounts'
                 };
             }
 
-            // 2. التحقق من تعدد الحسابات على نفس الجهاز
+            // التحقق من تعدد الحسابات على نفس الجهاز
             const existingUser = this.deviceUsers.get(deviceHash);
             if (existingUser && existingUser !== userId) {
-                this.banDevice(deviceHash, 'تعدد الحسابات على نفس الجهاز');
+                this.banDevice(deviceHash, 'multiple_accounts', 30 * 24 * 60 * 60 * 1000);
                 return { 
                     success: false, 
-                    error: '🚫 مسموح بحساب واحد فقط لكل جهاز',
-                    banReason: 'multiple_accounts',
-                    banned: true
+                    error: 'Multiple accounts detected',
+                    banReason: 'multiple_accounts'
                 };
             }
 
-            // 3. التحقق من الطلبات المشبوهة
-            const requestAnalysis = this.analyzeRequest(req);
-            if (requestAnalysis.isSuspicious) {
-                this.recordSuspiciousActivity(deviceHash, 'طلب مشبوه', requestAnalysis);
-                
-                if (this.failedAttempts.get(deviceHash) >= this.config.maxFailedAttempts) {
-                    this.banDevice(deviceHash, 'أنشطة مشبوهة متكررة');
-                    return { 
-                        success: false, 
-                        error: '🚫 تم حظر الجهاز due to suspicious activities',
-                        banned: true
-                    };
-                }
-            }
-
-            // 4. التحقق من معدل الطلبات
-            if (!this.checkRateLimit(deviceHash)) {
-                this.recordSuspiciousActivity(deviceHash, 'معدل طلبات مرتفع');
-                return { 
-                    success: false, 
-                    error: '⏳ معدل الطلبات مرتفع جداً، حاول لاحقاً'
-                };
-            }
-
-            // ✅ تسجيل الجهاز للمستخدم
+            // تسجيل الجهاز للمستخدم
             this.deviceUsers.set(deviceHash, userId);
+            this.userDevices.set(userId, deviceHash);
+
+            // تحديث الملف الشخصي للجهاز
+            this.updateDeviceProfile(deviceHash, req);
 
             return { 
                 success: true, 
@@ -329,64 +274,10 @@ class AdvancedSecuritySystem {
 
         } catch (error) {
             console.error('❌ خطأ في التحقق من الجهاز:', error);
-            return { success: false, error: 'فشل التحقق الأمني' };
+            return { success: false, error: 'Device validation failed' };
         }
     }
 
-    // 🔒 تحليل الطلب لاكتشاف الاسكربتات
-    analyzeRequest(req) {
-        const analysis = {
-            isSuspicious: false,
-            reasons: [],
-            riskLevel: 0,
-            detectedPatterns: []
-        };
-
-        // تحليل User-Agent
-        const ua = req.headers['user-agent'] || '';
-        if (!this.isValidUserAgent(ua)) {
-            analysis.reasons.push('user_agent_suspicious');
-            analysis.riskLevel += 20;
-        }
-
-        // تحليل الهيدرات
-        analysis.reasons.push(...this.analyzeHeaders(req.headers));
-
-        // تحليل الجسم
-        if (req.body) {
-            analysis.reasons.push(...this.analyzeBody(req.body));
-        }
-
-        // اكتشاف الأنماط المشبوهة
-        const requestStr = JSON.stringify({ headers: req.headers, body: req.body });
-        this.config.suspiciousPatterns.forEach(pattern => {
-            if (pattern.test(requestStr)) {
-                analysis.detectedPatterns.push(pattern.toString());
-                analysis.riskLevel += 25;
-            }
-        });
-
-        analysis.isSuspicious = analysis.riskLevel > 40;
-        return analysis;
-    }
-
-    // 📱 التحقق من User-Agent
-    isValidUserAgent(userAgent) {
-        if (!userAgent || userAgent.length < 10) return false;
-        
-        const suspiciousPatterns = [
-            /python-requests/i,
-            /node-fetch/i,
-            /axios/i,
-            /curl/i,
-            /wget/i,
-            /bot|scraper|crawler|spider/i
-        ];
-
-        return !suspiciousPatterns.some(pattern => pattern.test(userAgent));
-    }
-
-    // 🚫 نظام الحظر
     isDeviceBanned(deviceHash) {
         const banInfo = this.bannedDevices.get(deviceHash);
         if (!banInfo) return false;
@@ -399,11 +290,11 @@ class AdvancedSecuritySystem {
         return true;
     }
 
-    banDevice(deviceHash, reason) {
+    banDevice(deviceHash, reason, duration = null) {
         const banInfo = {
             reason,
             bannedAt: Date.now(),
-            expiresAt: Date.now() + this.config.banDuration,
+            expiresAt: duration ? Date.now() + duration : null,
             deviceHash
         };
 
@@ -411,42 +302,27 @@ class AdvancedSecuritySystem {
         console.log(`🚫 تم حظر الجهاز ${deviceHash}: ${reason}`);
     }
 
-    // 📊 نظام تحديد معدل الطلبات
-    checkRateLimit(deviceHash) {
-        const now = Date.now();
-        const windowStart = now - this.config.requestWindow;
+    updateDeviceProfile(deviceHash, req) {
+        const profile = this.deviceProfiles.get(deviceHash) || {
+            firstSeen: Date.now(),
+            requestCount: 0,
+            lastSeen: Date.now(),
+            userAgent: req.headers['user-agent']
+        };
 
-        if (!this.requestHistory.has(deviceHash)) {
-            this.requestHistory.set(deviceHash, []);
-        }
-
-        const requests = this.requestHistory.get(deviceHash);
+        profile.requestCount++;
+        profile.lastSeen = Date.now();
         
-        // إزالة الطلبات القديمة
-        const recentRequests = requests.filter(time => time > windowStart);
-        this.requestHistory.set(deviceHash, recentRequests);
-
-        // التحقق من الحد
-        if (recentRequests.length >= this.config.maxRequestsPerMinute) {
-            return false;
-        }
-
-        // تسجيل الطلب الجديد
-        recentRequests.push(now);
-        return true;
+        this.deviceProfiles.set(deviceHash, profile);
     }
 
-    // ⚠️ تسجيل الأنشطة المشبوهة
-    recordSuspiciousActivity(deviceHash, activityType, details = {}) {
-        const currentAttempts = this.failedAttempts.get(deviceHash) || 0;
-        this.failedAttempts.set(deviceHash, currentAttempts + 1);
-
+    // 🔒 نظام مراقبة النشاط المشبوه
+    recordSuspiciousActivity(deviceHash, activityType, details) {
         const activity = {
             type: activityType,
             timestamp: Date.now(),
             details: details,
-            deviceHash: deviceHash,
-            attemptNumber: currentAttempts + 1
+            deviceHash: deviceHash
         };
 
         if (!this.suspiciousActivities.has(deviceHash)) {
@@ -456,80 +332,213 @@ class AdvancedSecuritySystem {
         const activities = this.suspiciousActivities.get(deviceHash);
         activities.push(activity);
 
-        // الحظر التلقائي بعد محاولات فاشلة متعددة
-        if (currentAttempts + 1 >= this.config.maxFailedAttempts) {
-            this.banDevice(deviceHash, 'محاولات مشبوهة متكررة');
+        // إذا تجاوز عدد الأنشطة المشبوهة الحد المسموح
+        if (activities.length > 5) {
+            this.banDevice(deviceHash, 'excessive_suspicious_activity', 24 * 60 * 60 * 1000);
         }
 
-        console.log(`⚠️  نشاط مشبوه: ${activityType} للجهاز ${deviceHash} (المحاولة ${currentAttempts + 1})`);
+        console.log(`⚠️  نشاط مشبوه مسجل: ${activityType} للجهاز ${deviceHash}`);
+    }
+}
+
+// 🚨 نظام مراقبة الطلبات والأخطاء
+class RequestErrorMonitor {
+    constructor() {
+        this.userErrors = new Map();
+        this.deviceErrors = new Map();
+        this.suspiciousPatterns = [
+            /sql.*injection|drop.*table|union.*select/i,
+            /<script>|javascript:|onclick=|onload=/i,
+            /eval\(|setTimeout\(|setInterval\(/i,
+            /\.\.\/|\.\.\\/i,
+            /bin\/sh|cmd\.exe|powershell/i
+        ];
+        this.requestLimits = new Map();
     }
 
-    // تحليل الهيدرات
+    analyzeRequest(req, error = null) {
+        const analysis = {
+            isSuspicious: false,
+            reasons: [],
+            riskLevel: 0
+        };
+
+        analysis.reasons.push(...this.analyzeHeaders(req.headers));
+        
+        if (req.body) {
+            analysis.reasons.push(...this.analyzeBody(req.body));
+        }
+
+        analysis.riskLevel = this.calculateRiskLevel(analysis.reasons);
+        analysis.isSuspicious = analysis.riskLevel > 60;
+
+        return analysis;
+    }
+
     analyzeHeaders(headers) {
         const reasons = [];
         
-        if (!headers['user-agent']) {
-            reasons.push('missing_user_agent');
+        if (!headers['user-agent'] || headers['user-agent'].length < 10) {
+            reasons.push('missing_or_short_user_agent');
         }
 
-        if (headers['user-agent'] && headers['user-agent'].length < 10) {
-            reasons.push('suspicious_user_agent_length');
+        if (headers['user-agent'] && this.isSuspiciousUserAgent(headers['user-agent'])) {
+            reasons.push('suspicious_user_agent');
         }
 
         return reasons;
     }
 
-    // تحليل الجسم
     analyzeBody(body) {
         const reasons = [];
-        const bodyStr = JSON.stringify(body).toLowerCase();
+        const bodyString = JSON.stringify(body).toLowerCase();
 
-        if (bodyStr.length > 10000) {
+        this.suspiciousPatterns.forEach(pattern => {
+            if (pattern.test(bodyString)) {
+                reasons.push(`suspicious_pattern: ${pattern.toString()}`);
+            }
+        });
+
+        if (bodyString.length > 10000) {
             reasons.push('large_request_body');
         }
 
         return reasons;
     }
 
-    // تحليل بيانات تليجرام
-    parseTelegramUser(initData) {
-        try {
-            const decodedInitData = decodeURIComponent(initData);
-            const parsedData = querystring.parse(decodedInitData);
-            
-            if (parsedData.user) {
-                return JSON.parse(parsedData.user);
-            }
-            return null;
-        } catch (error) {
-            console.error('❌ خطأ في تحليل بيانات المستخدم:', error);
-            return null;
-        }
+    isSuspiciousUserAgent(userAgent) {
+        const suspiciousAgents = [
+            'python', 'curl', 'wget', 'postman', 'insomnia',
+            'headless', 'phantomjs', 'selenium', 'puppeteer'
+        ];
+        return suspiciousAgents.some(agent => userAgent.toLowerCase().includes(agent));
     }
 
-    // 📈 إحصائيات الحماية
-    getSecurityStats() {
-        return {
-            totalDevices: this.deviceUsers.size,
-            bannedDevices: this.bannedDevices.size,
-            suspiciousActivities: this.suspiciousActivities.size,
-            failedAttempts: this.failedAttempts.size
+    recordError(userId, deviceHash, errorType, analysis) {
+        const userErrorInfo = this.userErrors.get(userId) || { count: 0, lastError: Date.now(), errors: [] };
+        userErrorInfo.count++;
+        userErrorInfo.lastError = Date.now();
+        userErrorInfo.errors.push({
+            type: errorType,
+            timestamp: Date.now(),
+            analysis: analysis
+        });
+        this.userErrors.set(userId, userErrorInfo);
+
+        const deviceErrorInfo = this.deviceErrors.get(deviceHash) || { count: 0, lastError: Date.now() };
+        deviceErrorInfo.count++;
+        deviceErrorInfo.lastError = Date.now();
+        this.deviceErrors.set(deviceHash, deviceErrorInfo);
+
+        if (userErrorInfo.count > 10 || deviceErrorInfo.count > 15) {
+            return this.triggerAutoBan(userId, deviceHash, 'excessive_errors');
+        }
+
+        return false;
+    }
+
+    triggerAutoBan(userId, deviceHash, reason) {
+        const banDuration = this.calculateBanDuration(reason);
+        
+        deviceFingerprint.banDevice(deviceHash, reason, banDuration);
+
+        console.log(`🚨 AUTO-BAN: User ${userId}, Device ${deviceHash} - ${reason}`);
+        
+        return true;
+    }
+
+    calculateRiskLevel(reasons) {
+        let score = 0;
+        reasons.forEach(reason => {
+            if (reason.includes('suspicious_pattern')) score += 30;
+            if (reason.includes('suspicious_user_agent')) score += 25;
+            if (reason.includes('missing_or_short_user_agent')) score += 20;
+            if (reason.includes('large_request_body')) score += 15;
+        });
+        return Math.min(100, score);
+    }
+
+    calculateBanDuration(reason) {
+        const durations = {
+            'excessive_errors': 24 * 60 * 60 * 1000,
+            'multiple_accounts': 30 * 24 * 60 * 60 * 1000,
+            'excessive_suspicious_activity': 24 * 60 * 60 * 1000
         };
+        return durations[reason] || 24 * 60 * 60 * 1000;
+    }
+
+    // 🔒 نظام تحديد معدل الطلبات
+    checkRateLimit(deviceHash, endpoint) {
+        const key = `${deviceHash}:${endpoint}`;
+        const now = Date.now();
+        const windowStart = now - 60000; // نافذة 60 ثانية
+
+        if (!this.requestLimits.has(key)) {
+            this.requestLimits.set(key, []);
+        }
+
+        const requests = this.requestLimits.get(key);
+        
+        // إزالة الطلبات القديمة
+        const recentRequests = requests.filter(time => time > windowStart);
+        this.requestLimits.set(key, recentRequests);
+
+        // التحقق من الحد
+        if (recentRequests.length >= 60) { // 60 طلب في الدقيقة
+            return false;
+        }
+
+        // تسجيل الطلب الجديد
+        recentRequests.push(now);
+        return true;
+    }
+}
+
+// 🔒 نظام التحقق من التليجرام فقط
+class TelegramOnlyEnforcer {
+    constructor() {
+        this.allowedUserAgents = [
+            'TelegramBot',
+            'Mozilla/5.0 (iPhone; CPU iPhone OS',
+            'Mozilla/5.0 (Android; Mobile;',
+            'Mozilla/5.0 (Linux; Android'
+        ];
+    }
+
+    validateTelegramOrigin(req) {
+        const userAgent = req.headers['user-agent'] || '';
+        const origin = req.headers['origin'] || req.headers['referer'] || '';
+
+        const isTelegramUserAgent = this.allowedUserAgents.some(agent => 
+            userAgent.includes(agent)
+        );
+
+        const isTelegramOrigin = origin.includes('web.telegram.org') || 
+                                origin.includes('telegram.org');
+
+        if (!isTelegramUserAgent && !isTelegramOrigin) {
+            console.log('🚫 محاولة دخول من خارج التليجرام:', { userAgent, origin });
+            return false;
+        }
+
+        return true;
     }
 }
 
 // 🔧 نظام التوكن الديناميكي
-class EnhancedTokenSystem {
+class DynamicTokenSystem {
     constructor() {
         this.tokens = new Map();
         this.currentToken = null;
+        this.tokenHistory = [];
         this.tokenCounter = 0;
         this.intervalId = null;
         
         this.config = {
-            tokenRefreshInterval: 9000, // كما هو 9 ثواني
-            tokenValidityWindow: 25000, // كما هو 25 ثانية
-            secretKey: 'ton-rewards-dynamic-token-secret-2024'
+            tokenRefreshInterval: 9000,
+            tokenValidityWindow: 25000,
+            maxTokens: 20,
+            secretKey: process.env.TOKEN_SECRET || 'ton-rewards-dynamic-token-secret-2024'
         };
     }
 
@@ -541,7 +550,7 @@ class EnhancedTokenSystem {
             timestamp,
             counter: this.tokenCounter,
             random: crypto.randomBytes(32).toString('hex'),
-            signature: crypto.createHash('md5').update(timestamp + this.config.secretKey).digest('hex')
+            userAgent: 'ton-rewards-webapp'
         };
 
         const tokenString = JSON.stringify(tokenData);
@@ -563,6 +572,7 @@ class EnhancedTokenSystem {
 
     start() {
         console.log('🚀 بدء نظام التوكن الديناميكي المحسن...');
+        console.log(`🔄 معدل التحديث: ${this.config.tokenRefreshInterval/1000} ثواني`);
         this.updateToken();
         
         this.intervalId = setInterval(() => {
@@ -574,7 +584,19 @@ class EnhancedTokenSystem {
         const newToken = this.generateToken();
         this.tokens.set(newToken.token, newToken);
         this.currentToken = newToken.token;
+        
+        this.tokenHistory.unshift({
+            token: newToken.token.substring(0, 20) + '...',
+            timestamp: new Date(newToken.timestamp).toLocaleTimeString(),
+            counter: newToken.counter
+        });
+        
+        if (this.tokenHistory.length > this.config.maxTokens) {
+            this.tokenHistory.pop();
+        }
+
         this.cleanExpiredTokens();
+        console.log(`🔄 تحديث التوكن #${newToken.counter} (${new Date().toLocaleTimeString()})`);
     }
 
     cleanExpiredTokens() {
@@ -588,25 +610,38 @@ class EnhancedTokenSystem {
 
     validateToken(token) {
         if (!token || token.length < 10) {
+            console.log('❌ توكن غير صالح - فارغ أو قصير');
             return false;
         }
 
         const tokenData = this.tokens.get(token);
         if (!tokenData) {
+            console.log('❌ توكن غير معترف به');
             return false;
         }
         
         const now = Date.now();
         if (tokenData.expiresAt < now) {
             this.tokens.delete(token);
+            console.log('⏰ توكن منتهي');
             return false;
         }
         
+        console.log('✅ توكن صالح');
         return true;
     }
 
     getCurrentToken() {
         return this.currentToken;
+    }
+
+    getStats() {
+        return {
+            currentToken: this.currentToken ? this.currentToken.substring(0, 20) + '...' : null,
+            activeTokens: this.tokens.size,
+            totalGenerated: this.tokenCounter,
+            refreshInterval: this.config.tokenRefreshInterval
+        };
     }
 
     stop() {
@@ -616,10 +651,187 @@ class EnhancedTokenSystem {
     }
 }
 
-// تهيئة الأنظمة
-const securitySystem = new AdvancedSecuritySystem();
-const tokenSystem = new EnhancedTokenSystem();
+// 🌍 نظام كشف الدولة والمنع الجغرافي
+class GeoLocationSystem {
+    constructor() {
+        this.bannedCountries = [
+            'IN', 'RU', 'LY', 'AF', 'NL', 'MN', 'US', 'LK', 'UA'
+        ];
+        this.countryCache = new Map();
+    }
+
+    async detectCountry(ip) {
+        try {
+            if (this.countryCache.has(ip)) {
+                return this.countryCache.get(ip);
+            }
+
+            const response = await fetch(`http://ip-api.com/json/${ip}`);
+            const data = await response.json();
+            
+            const countryInfo = {
+                countryCode: data.countryCode,
+                countryName: data.country,
+                region: data.regionName,
+                city: data.city,
+                ip: ip
+            };
+
+            this.countryCache.set(ip, countryInfo);
+            
+            // تنظيف الكاش بعد ساعة
+            setTimeout(() => {
+                this.countryCache.delete(ip);
+            }, 60 * 60 * 1000);
+
+            return countryInfo;
+        } catch (error) {
+            console.error('❌ خطأ في كشف الدولة:', error);
+            return {
+                countryCode: 'UNKNOWN',
+                countryName: 'Unknown',
+                ip: ip
+            };
+        }
+    }
+
+    isCountryAllowed(countryCode) {
+        return !this.bannedCountries.includes(countryCode);
+    }
+
+    getBannedCountries() {
+        return this.bannedCountries;
+    }
+}
+
+// تهيئة أنظمة الحماية
+const deviceFingerprint = new AdvancedDeviceFingerprint();
+const requestMonitor = new RequestErrorMonitor();
+const telegramEnforcer = new TelegramOnlyEnforcer();
+const tokenSystem = new DynamicTokenSystem();
+const geolocationSystem = new GeoLocationSystem();
 tokenSystem.start();
+
+// 🔧 middleware محسن للتحقق من التوكن والحماية
+const advancedSecurityMiddleware = (req, res, next) => {
+    const publicEndpoints = [
+        '/', 
+        '/api/token/current', 
+        '/api/token/stats', 
+        '/api/check-tables', 
+        '/api/setup-database', 
+        '/api/config',
+        '/api/fix-all-tables', 
+        '/api/fix-withdrawals-table', 
+        '/api/debug-tables', 
+        '/api/repair-database', 
+        '/api/debug-user',
+        '/api/reward-codes/validate', 
+        '/api/reward-codes/redeem',
+        '/api/fix-contest-data', 
+        '/api/fix-all-contest-data',
+        '/api/database/status', 
+        '/api/health', 
+        '/api/test-connection',
+        '/api/contest/leaderboard',
+        '/api/contest/user-rank/:userId',
+        '/api/contest/user/:userId',
+        '/api/validate-initdata',
+        '/api/stats',
+        '/api/security/status'
+    ];
+    
+    const isPublicEndpoint = publicEndpoints.some(endpoint => {
+        if (endpoint.includes(':')) {
+            const basePath = endpoint.split('/:')[0];
+            return req.path.startsWith(basePath);
+        }
+        return req.path === endpoint;
+    });
+    
+    if (isPublicEndpoint) {
+        return next();
+    }
+
+    // 1. التحقق من التليجرام فقط
+    if (!telegramEnforcer.validateTelegramOrigin(req)) {
+        return res.status(403).json({ 
+            success: false,
+            error: 'Access denied - Telegram only',
+            code: 'TELEGRAM_ONLY'
+        });
+    }
+
+    // 2. التحقق من التوكن
+    const token = req.headers['x-dynamic-token'] || 
+                  req.headers['authorization']?.replace('Bearer ', '') || 
+                  req.query.dynamicToken;
+
+    if (!token) {
+        console.log('❌ طلب بدون توكن:', req.path);
+        return res.status(401).json({ 
+            success: false,
+            error: 'التوكن الديناميكي مطلوب',
+            code: 'DYNAMIC_TOKEN_REQUIRED'
+        });
+    }
+
+    if (!tokenSystem.validateToken(token)) {
+        console.log('🔄 محاولة تجديد التوكن تلقائياً...');
+        tokenSystem.updateToken();
+        
+        return res.status(401).json({ 
+            success: false,
+            error: 'توكن ديناميكي غير صالح أو منتهي',
+            code: 'INVALID_DYNAMIC_TOKEN',
+            hint: 'جرب تحديث الصفحة'
+        });
+    }
+
+    // 3. تحديد معدل الطلبات
+    const deviceHash = deviceFingerprint.generateDeviceFingerprint(req, req.body?.initData);
+    if (!requestMonitor.checkRateLimit(deviceHash, req.path)) {
+        return res.status(429).json({ 
+            success: false,
+            error: 'Too many requests',
+            code: 'RATE_LIMIT_EXCEEDED'
+        });
+    }
+
+    // 4. التحقق من initData لطلبات POST
+    if (req.method === 'POST' && req.body && req.body.initData) {
+        const deviceValidation = deviceFingerprint.validateDeviceUser(req, req.body.initData);
+        if (!deviceValidation.success) {
+            return res.status(403).json({ 
+                success: false,
+                error: deviceValidation.error,
+                code: 'DEVICE_VALIDATION_FAILED',
+                banReason: deviceValidation.banReason
+            });
+        }
+
+        // تحليل الطلب لاكتشاف الاسكربتات
+        const requestAnalysis = requestMonitor.analyzeRequest(req);
+        if (requestAnalysis.isSuspicious) {
+            requestMonitor.recordError(
+                deviceValidation.userId, 
+                deviceValidation.deviceHash, 
+                'suspicious_request', 
+                requestAnalysis
+            );
+            
+            return res.status(429).json({ 
+                success: false,
+                error: 'Suspicious activity detected',
+                code: 'SUSPICIOUS_REQUEST'
+            });
+        }
+    }
+
+    next();
+};
+
+app.use(advancedSecurityMiddleware);
 
 // 🔧 دوال مساعدة محسنة
 async function checkDatabaseConnection() {
@@ -739,96 +951,6 @@ async function createUserInDB(userData) {
         return null;
     }
 }
-
-// 🔐 ميدلوير الحماية المركزية
-const advancedSecurityMiddleware = (req, res, next) => {
-    const publicEndpoints = [
-        '/', 
-        '/api/token/current', 
-        '/api/token/stats', 
-        '/api/check-tables', 
-        '/api/setup-database', 
-        '/api/config',
-        '/api/fix-all-tables', 
-        '/api/fix-withdrawals-table', 
-        '/api/debug-tables', 
-        '/api/repair-database', 
-        '/api/debug-user',
-        '/api/reward-codes/validate', 
-        '/api/reward-codes/redeem',
-        '/api/fix-contest-data', 
-        '/api/fix-all-contest-data',
-        '/api/database/status', 
-        '/api/health', 
-        '/api/test-connection',
-        '/api/contest/leaderboard',
-        '/api/contest/user-rank/:userId',
-        '/api/contest/user/:userId',
-        '/api/validate-initdata',
-        '/api/stats',
-        '/api/security/status'
-    ];
-    
-    const isPublicEndpoint = publicEndpoints.some(endpoint => {
-        if (endpoint.includes(':')) {
-            const basePath = endpoint.split('/:')[0];
-            return req.path.startsWith(basePath);
-        }
-        return req.path === endpoint;
-    });
-    
-    if (isPublicEndpoint) {
-        return next();
-    }
-
-    // 1. التحقق من التوكن الديناميكي
-    const token = req.headers['x-dynamic-token'] || 
-                  req.headers['authorization']?.replace('Bearer ', '') || 
-                  req.query.dynamicToken;
-
-    if (!token) {
-        console.log('❌ طلب بدون توكن:', req.path);
-        return res.status(401).json({ 
-            success: false,
-            error: 'التوكن الديناميكي مطلوب',
-            code: 'DYNAMIC_TOKEN_REQUIRED'
-        });
-    }
-
-    if (!tokenSystem.validateToken(token)) {
-        return res.status(401).json({ 
-            success: false,
-            error: 'توكن ديناميكي غير صالح أو منتهي',
-            code: 'INVALID_DYNAMIC_TOKEN'
-        });
-    }
-
-    // 2. التحقق من initData لطلبات POST
-    if (req.method === 'POST' && req.body && req.body.initData) {
-        const securityCheck = securitySystem.validateDeviceAndUser(req, req.body.initData);
-        
-        if (!securityCheck.success) {
-            if (securityCheck.banned) {
-                return res.status(403).json({ 
-                    success: false,
-                    error: securityCheck.error,
-                    code: 'DEVICE_BANNED',
-                    banned: true
-                });
-            }
-            
-            return res.status(403).json({ 
-                success: false,
-                error: securityCheck.error,
-                code: 'SECURITY_CHECK_FAILED'
-            });
-        }
-    }
-
-    next();
-};
-
-app.use(advancedSecurityMiddleware);
 
 // 📺 مشاهدة إعلان - مع الحماية المضافة
 app.post('/api/watch-ad', async (req, res) => {
@@ -981,8 +1103,9 @@ app.post('/api/watch-ad', async (req, res) => {
         console.error('❌ خطأ في مشاهدة الإعلان:', error.message);
         
         if (req.body.initData) {
-            const deviceHash = securitySystem.generateDeviceFingerprint(req, req.body.initData);
-            securitySystem.recordSuspiciousActivity(deviceHash, 'خطأ في مشاهدة الإعلان', { error: error.message });
+            const telegramUser = parseTelegramUser(req.body.initData);
+            const deviceHash = deviceFingerprint.generateDeviceFingerprint(req, req.body.initData);
+            requestMonitor.recordError(telegramUser?.id, deviceHash, 'watch_ad_error', {});
         }
         
         res.status(500).json({ 
@@ -1382,8 +1505,9 @@ app.post('/api/withdraw', async (req, res) => {
         console.error('❌ خطأ في السحب:', error.message);
         
         if (req.body.initData) {
-            const deviceHash = securitySystem.generateDeviceFingerprint(req, req.body.initData);
-            securitySystem.recordSuspiciousActivity(deviceHash, 'خطأ في السحب', { error: error.message });
+            const telegramUser = parseTelegramUser(req.body.initData);
+            const deviceHash = deviceFingerprint.generateDeviceFingerprint(req, req.body.initData);
+            requestMonitor.recordError(telegramUser?.id, deviceHash, 'withdrawal_error', {});
         }
         
         res.status(500).json({ 
@@ -1539,24 +1663,14 @@ app.post('/api/contest/update-points', async (req, res) => {
 // 🏆 جلب المتصدرين مرتبين حسب النقاط
 app.get('/api/contest/leaderboard', async (req, res) => {
     try {
-        const leaderboard = await dbManager.query(`
-            SELECT 
-                cl.*,
-                bu.username,
-                bu.first_name,
-                ROW_NUMBER() OVER (ORDER BY cl.points DESC, cl.last_activity DESC) as rank
-            FROM contest_leaderboard cl
-            LEFT JOIN bot_users bu ON cl.user_id = bu.telegram_id
-            ORDER BY cl.points DESC, cl.last_activity DESC
-            LIMIT 50
-        `);
+        const leaderboard = await updateContestLeaderboard();
         
-        console.log(`📊 جلب ${leaderboard.rows.length} متسابق من المسابقة`);
+        console.log(`📊 جلب ${leaderboard.length} متسابق من المسابقة`);
         
         res.json({
             success: true,
-            leaderboard: leaderboard.rows,
-            totalParticipants: leaderboard.rows.length,
+            leaderboard: leaderboard,
+            totalParticipants: leaderboard.length,
             lastUpdated: new Date().toISOString()
         });
     } catch (error) {
@@ -1613,6 +1727,29 @@ app.get('/api/contest/user/:userId', async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
+
+// 🔥 دالة مساعدة لتحديث قائمة المتصدرين - مع الإصلاح
+async function updateContestLeaderboard() {
+    try {
+        const leaderboard = await dbManager.query(`
+            SELECT 
+                cl.*,
+                bu.username,
+                bu.first_name,
+                ROW_NUMBER() OVER (ORDER BY cl.points DESC, cl.last_activity DESC) as rank
+            FROM contest_leaderboard cl
+            LEFT JOIN bot_users bu ON cl.user_id = bu.telegram_id
+            ORDER BY cl.points DESC, cl.last_activity DESC
+            LIMIT 50
+        `);
+        
+        console.log(`⚡ تم تحديث قائمة المتصدرين: ${leaderboard?.rows?.length || 0} متسابق`);
+        return leaderboard?.rows || [];
+    } catch (error) {
+        console.error('❌ خطأ في تحديث المتصدرين:', error);
+        return [];
+    }
+}
 
 // 👥 نظام الإحالات
 app.post('/api/referrals/add', async (req, res) => {
@@ -1696,75 +1833,119 @@ app.get('/api/referrals/user/:userId', async (req, res) => {
     }
 });
 
-// 🏥 endpoint للصحة العامة
-app.get('/api/health', async (req, res) => {
+// 🔒 نظام الحماية - نقاط نهاية جديدة
+app.post('/api/validate-initdata', async (req, res) => {
     try {
-        const dbStatus = await dbManager.healthCheck();
+        const { initData } = req.body;
+        
+        if (!initData) {
+            return res.status(400).json({ success: false, error: 'initData is required' });
+        }
+        
+        const isValid = validateTelegramInitData(initData);
+        
+        if (isValid) {
+            const telegramUser = parseTelegramUser(initData);
+            const deviceHash = deviceFingerprint.generateDeviceFingerprint(req, initData);
+            
+            res.json({
+                success: true,
+                userId: telegramUser?.id,
+                deviceHash: deviceHash,
+                message: 'Telegram initData is valid'
+            });
+        } else {
+            res.status(401).json({
+                success: false,
+                error: 'Invalid Telegram initData'
+            });
+        }
+    } catch (error) {
+        console.error('❌ خطأ في التحقق من initData:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/api/security/status', async (req, res) => {
+    try {
+        res.json({
+            success: true,
+            security: {
+                deviceFingerprint: {
+                    totalDevices: deviceFingerprint.deviceUsers.size,
+                    bannedDevices: deviceFingerprint.bannedDevices.size,
+                    deviceProfiles: deviceFingerprint.deviceProfiles.size,
+                    suspiciousActivities: deviceFingerprint.suspiciousActivities.size
+                },
+                requestMonitor: {
+                    userErrors: requestMonitor.userErrors.size,
+                    deviceErrors: requestMonitor.deviceErrors.size,
+                    requestLimits: requestMonitor.requestLimits.size
+                },
+                telegramEnforcer: 'active',
+                tokenSystem: tokenSystem.getStats(),
+                geolocation: {
+                    bannedCountries: geolocationSystem.getBannedCountries(),
+                    countryCache: geolocationSystem.countryCache.size
+                }
+            },
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('❌ خطأ في جلب حالة الحماية:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/api/security/report', async (req, res) => {
+    try {
+        const { initData, activityType, details } = req.body;
+        
+        if (!validateTelegramInitData(initData)) {
+            return res.status(401).json({ success: false, error: 'Invalid initData' });
+        }
+        
+        const telegramUser = parseTelegramUser(initData);
+        const deviceHash = deviceFingerprint.generateDeviceFingerprint(req, initData);
+        
+        deviceFingerprint.recordSuspiciousActivity(deviceHash, activityType, details);
+        
+        console.log(`⚠️  تم الإبلاغ عن نشاط مشبوه: ${activityType} من المستخدم ${telegramUser?.id}`);
         
         res.json({
             success: true,
-            status: 'healthy',
-            timestamp: new Date().toISOString(),
-            database: dbStatus ? 'connected' : 'disconnected',
-            security: securitySystem.getSecurityStats(),
-            uptime: process.uptime()
+            message: 'Suspicious activity reported successfully',
+            activityType: activityType,
+            timestamp: new Date().toISOString()
         });
     } catch (error) {
-        res.status(500).json({
-            success: false,
-            status: 'unhealthy',
-            error: error.message
-        });
+        console.error('❌ خطأ في الإبلاغ عن النشاط المشبوه:', error);
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// 🔧 endpoints إضافية للتحكم
-app.get('/api/token/current', (req, res) => {
-    res.json({
-        success: true,
-        token: tokenSystem.getCurrentToken()
-    });
-});
-
-app.get('/api/token/stats', (req, res) => {
-    res.json({
-        success: true,
-        activeTokens: tokenSystem.tokens.size,
-        currentTokenCounter: tokenSystem.tokenCounter
-    });
-});
-
-app.get('/api/config', (req, res) => {
-    res.json({
-        success: true,
-        config: config
-    });
-});
-
-app.get('/api/database/status', async (req, res) => {
+// 🌍 نظام كشف الدولة
+app.get('/api/geolocation/detect', async (req, res) => {
     try {
-        const status = await dbManager.healthCheck();
+        const ip = req.headers['x-forwarded-for'] || 
+                  req.headers['x-real-ip'] || 
+                  req.connection.remoteAddress || 
+                  req.socket.remoteAddress;
+        
+        const countryInfo = await geolocationSystem.detectCountry(ip);
+        const isAllowed = geolocationSystem.isCountryAllowed(countryInfo.countryCode);
+        
         res.json({
             success: true,
-            connected: status,
-            initialized: dbManager.initialized,
-            retryCount: dbManager.retryCount
+            ip: ip,
+            country: countryInfo,
+            isAllowed: isAllowed,
+            message: isAllowed ? 'Country is allowed' : 'Country is banned'
         });
     } catch (error) {
-        res.json({
-            success: false,
-            connected: false,
-            error: error.message
-        });
+        console.error('❌ خطأ في كشف الدولة:', error);
+        res.status(500).json({ success: false, error: error.message });
     }
-});
-
-// 🔍 endpoint لفحص نظام الحماية الجديد
-app.get('/api/security/status', (req, res) => {
-    res.json({
-        success: true,
-        security: securitySystem.getSecurityStats()
-    });
 });
 
 // 🩹 فحص وإصلاح الجداول
@@ -1776,6 +1957,8 @@ app.get('/api/check-tables', async (req, res) => {
             'bot_users',
             'withdrawals', 
             'contest_leaderboard',
+            'reward_codes',
+            'code_redemptions',
             'referrals'
         ];
         
@@ -1894,6 +2077,97 @@ app.get('/api/setup-database', async (req, res) => {
     }
 });
 
+// 🏥 endpoint للصحة العامة
+app.get('/api/health', async (req, res) => {
+    try {
+        const dbStatus = await checkDatabaseConnection();
+        const tokenStats = tokenSystem.getStats();
+        
+        res.json({
+            success: true,
+            status: 'healthy',
+            timestamp: new Date().toISOString(),
+            database: dbStatus ? 'connected' : 'disconnected',
+            tokenSystem: tokenStats,
+            security: {
+                deviceFingerprint: deviceFingerprint.deviceUsers.size,
+                bannedDevices: deviceFingerprint.bannedDevices.size,
+                requestMonitor: requestMonitor.userErrors.size
+            },
+            uptime: process.uptime()
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            status: 'unhealthy',
+            error: error.message
+        });
+    }
+});
+
+// 🔧 endpoints إضافية للتحكم
+app.get('/api/token/current', (req, res) => {
+    res.json({
+        success: true,
+        token: tokenSystem.getCurrentToken(),
+        stats: tokenSystem.getStats()
+    });
+});
+
+app.get('/api/token/stats', (req, res) => {
+    res.json({
+        success: true,
+        stats: tokenSystem.getStats()
+    });
+});
+
+app.get('/api/config', (req, res) => {
+    res.json({
+        success: true,
+        config: config
+    });
+});
+
+app.get('/api/database/status', async (req, res) => {
+    try {
+        const status = await dbManager.healthCheck();
+        res.json({
+            success: true,
+            connected: status,
+            initialized: dbManager.initialized,
+            retryCount: dbManager.retryCount
+        });
+    } catch (error) {
+        res.json({
+            success: false,
+            connected: false,
+            error: error.message
+        });
+    }
+});
+
+// 🔍 endpoint لفحص نظام الحماية
+app.get('/api/security/status', (req, res) => {
+    res.json({
+        success: true,
+        security: {
+            deviceFingerprint: {
+                totalDevices: deviceFingerprint.deviceUsers.size,
+                bannedDevices: deviceFingerprint.bannedDevices.size
+            },
+            requestMonitor: {
+                userErrors: requestMonitor.userErrors.size,
+                deviceErrors: requestMonitor.deviceErrors.size
+            },
+            telegramEnforcer: 'active',
+            tokenSystem: tokenSystem.getStats(),
+            geolocation: {
+                bannedCountries: geolocationSystem.getBannedCountries()
+            }
+        }
+    });
+});
+
 // 🛑 إيقاف نظيف للسيرفر
 process.on('SIGINT', () => {
     console.log('\n🛑 إيقاف نظام التوكن...');
@@ -1911,21 +2185,52 @@ process.on('SIGTERM', () => {
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 
-app.listen(PORT, HOST, () => {
-    console.log(`🟢 TON Rewards Backend running on port ${PORT}`);
-    console.log(`💰 Ad reward: ${config.adValue} TON`);
-    console.log(`📊 Daily ads: ${config.dailyAdLimit} ads`);
-    console.log(`💸 Min withdrawal: ${config.minWithdrawal} TON`);
-    console.log(`👥 Referral bonus: ${config.referralBonus} TON`);
-    console.log(`🏆 Contest points per ad: ${config.contestAdPoints}`);
-    console.log(`🔐 Telegram verification: ENABLED`);
-    console.log(`🔄 Dynamic token system: ACTIVE (9 seconds)`);
-    console.log(`🗄️ Database manager: ${dbManager.initialized ? 'ACTIVE' : 'INITIALIZING'}`);
-    console.log(`🛡️ Advanced Security: ENABLED`);
-    console.log(`   ├─ Device Fingerprinting: ACTIVE`);
-    console.log(`   ├─ One Account Per Device: ACTIVE`);
-    console.log(`   ├─ Request Monitoring: ACTIVE`);
-    console.log(`   ├─ Rate Limiting: ACTIVE`);
-    console.log(`   ├─ Automatic Ban System: ACTIVE`);
-    console.log(`   └─ Script Detection: ACTIVE`);
-});
+setTimeout(() => {
+    app.listen(PORT, HOST, () => {
+        console.log(`🟢 TON Rewards Backend running on port ${PORT}`);
+        console.log(`💰 Ad reward: ${config.adValue} TON`);
+        console.log(`📊 Daily ads: ${config.dailyAdLimit} ads`);
+        console.log(`💸 Min withdrawal: ${config.minWithdrawal} TON`);
+        console.log(`👥 Referral bonus: ${config.referralBonus} TON`);
+        console.log(`🏆 Contest points per ad: ${config.contestAdPoints}`);
+        console.log(`🔐 Telegram verification: ENABLED`);
+        console.log(`🔄 Dynamic token system: ACTIVE (9 seconds)`);
+        console.log(`🗄️ Database manager: ${dbManager.initialized ? 'ACTIVE' : 'INITIALIZING'}`);
+        console.log(`🛡️ Advanced Security: ENABLED`);
+        console.log(`   ├─ Device Fingerprinting: ACTIVE`);
+        console.log(`   ├─ Multiple Accounts Prevention: ACTIVE`);
+        console.log(`   ├─ Request Monitoring: ACTIVE`);
+        console.log(`   ├─ Rate Limiting: ACTIVE`);
+        console.log(`   ├─ Telegram Only: ACTIVE`);
+        console.log(`   └─ Geolocation Filtering: ACTIVE`);
+        
+        checkDatabaseConnection();
+        
+        setTimeout(async () => {
+            try {
+                await dbManager.query(`
+                    CREATE TABLE IF NOT EXISTS bot_users (
+                        id SERIAL PRIMARY KEY,
+                        telegram_id BIGINT UNIQUE NOT NULL,
+                        username VARCHAR(255),
+                        first_name VARCHAR(255),
+                        balance DECIMAL(15,8) DEFAULT 0,
+                        earning_wallet DECIMAL(15,8) DEFAULT 0,
+                        total_earned DECIMAL(15,8) DEFAULT 0,
+                        daily_ad_count INTEGER DEFAULT 0,
+                        last_ad_date DATE,
+                        last_ad_timestamp TIMESTAMP,
+                        referral_code VARCHAR(50) UNIQUE,
+                        referred_by BIGINT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                `);
+                console.log('✅ جدول bot_users جاهز');
+                
+            } catch (error) {
+                console.log('⚠️  خطأ في إنشاء الجداول:', error.message);
+            }
+        }, 3000);
+    });
+}, 1000);
