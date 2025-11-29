@@ -23,7 +23,8 @@
     "rewards",
     "telegram",
     "bot",
-    "crypto"
+    "crypto",
+    "security"
   ],
   "author": "TON Rewards Team",
   "license": "MIT"
