@@ -201,6 +201,7 @@ class AdvancedDeviceFingerprint {
         this.userDevices = new Map();
         this.deviceProfiles = new Map();
         this.bannedDevices = new Map();
+        this.suspiciousActivities = new Map();
     }
 
     generateDeviceFingerprint(req, initData) {
@@ -314,6 +315,30 @@ class AdvancedDeviceFingerprint {
         
         this.deviceProfiles.set(deviceHash, profile);
     }
+
+    // 🔒 نظام مراقبة النشاط المشبوه
+    recordSuspiciousActivity(deviceHash, activityType, details) {
+        const activity = {
+            type: activityType,
+            timestamp: Date.now(),
+            details: details,
+            deviceHash: deviceHash
+        };
+
+        if (!this.suspiciousActivities.has(deviceHash)) {
+            this.suspiciousActivities.set(deviceHash, []);
+        }
+
+        const activities = this.suspiciousActivities.get(deviceHash);
+        activities.push(activity);
+
+        // إذا تجاوز عدد الأنشطة المشبوهة الحد المسموح
+        if (activities.length > 5) {
+            this.banDevice(deviceHash, 'excessive_suspicious_activity', 24 * 60 * 60 * 1000);
+        }
+
+        console.log(`⚠️  نشاط مشبوه مسجل: ${activityType} للجهاز ${deviceHash}`);
+    }
 }
 
 // 🚨 نظام مراقبة الطلبات والأخطاء
@@ -328,6 +353,7 @@ class RequestErrorMonitor {
             /\.\.\/|\.\.\\/i,
             /bin\/sh|cmd\.exe|powershell/i
         ];
+        this.requestLimits = new Map();
     }
 
     analyzeRequest(req, error = null) {
@@ -435,9 +461,36 @@ class RequestErrorMonitor {
     calculateBanDuration(reason) {
         const durations = {
             'excessive_errors': 24 * 60 * 60 * 1000,
-            'multiple_accounts': 30 * 24 * 60 * 60 * 1000
+            'multiple_accounts': 30 * 24 * 60 * 60 * 1000,
+            'excessive_suspicious_activity': 24 * 60 * 60 * 1000
         };
         return durations[reason] || 24 * 60 * 60 * 1000;
+    }
+
+    // 🔒 نظام تحديد معدل الطلبات
+    checkRateLimit(deviceHash, endpoint) {
+        const key = `${deviceHash}:${endpoint}`;
+        const now = Date.now();
+        const windowStart = now - 60000; // نافذة 60 ثانية
+
+        if (!this.requestLimits.has(key)) {
+            this.requestLimits.set(key, []);
+        }
+
+        const requests = this.requestLimits.get(key);
+        
+        // إزالة الطلبات القديمة
+        const recentRequests = requests.filter(time => time > windowStart);
+        this.requestLimits.set(key, recentRequests);
+
+        // التحقق من الحد
+        if (recentRequests.length >= 60) { // 60 طلب في الدقيقة
+            return false;
+        }
+
+        // تسجيل الطلب الجديد
+        recentRequests.push(now);
+        return true;
     }
 }
 
@@ -598,11 +651,65 @@ class DynamicTokenSystem {
     }
 }
 
+// 🌍 نظام كشف الدولة والمنع الجغرافي
+class GeoLocationSystem {
+    constructor() {
+        this.bannedCountries = [
+            'IN', 'RU', 'LY', 'AF', 'NL', 'MN', 'US', 'LK', 'UA'
+        ];
+        this.countryCache = new Map();
+    }
+
+    async detectCountry(ip) {
+        try {
+            if (this.countryCache.has(ip)) {
+                return this.countryCache.get(ip);
+            }
+
+            const response = await fetch(`http://ip-api.com/json/${ip}`);
+            const data = await response.json();
+            
+            const countryInfo = {
+                countryCode: data.countryCode,
+                countryName: data.country,
+                region: data.regionName,
+                city: data.city,
+                ip: ip
+            };
+
+            this.countryCache.set(ip, countryInfo);
+            
+            // تنظيف الكاش بعد ساعة
+            setTimeout(() => {
+                this.countryCache.delete(ip);
+            }, 60 * 60 * 1000);
+
+            return countryInfo;
+        } catch (error) {
+            console.error('❌ خطأ في كشف الدولة:', error);
+            return {
+                countryCode: 'UNKNOWN',
+                countryName: 'Unknown',
+                ip: ip
+            };
+        }
+    }
+
+    isCountryAllowed(countryCode) {
+        return !this.bannedCountries.includes(countryCode);
+    }
+
+    getBannedCountries() {
+        return this.bannedCountries;
+    }
+}
+
 // تهيئة أنظمة الحماية
 const deviceFingerprint = new AdvancedDeviceFingerprint();
 const requestMonitor = new RequestErrorMonitor();
 const telegramEnforcer = new TelegramOnlyEnforcer();
 const tokenSystem = new DynamicTokenSystem();
+const geolocationSystem = new GeoLocationSystem();
 tokenSystem.start();
 
 // 🔧 middleware محسن للتحقق من التوكن والحماية
@@ -630,7 +737,8 @@ const advancedSecurityMiddleware = (req, res, next) => {
         '/api/contest/user-rank/:userId',
         '/api/contest/user/:userId',
         '/api/validate-initdata',
-        '/api/stats'
+        '/api/stats',
+        '/api/security/status'
     ];
     
     const isPublicEndpoint = publicEndpoints.some(endpoint => {
@@ -680,7 +788,17 @@ const advancedSecurityMiddleware = (req, res, next) => {
         });
     }
 
-    // 3. التحقق من initData لطلبات POST
+    // 3. تحديد معدل الطلبات
+    const deviceHash = deviceFingerprint.generateDeviceFingerprint(req, req.body?.initData);
+    if (!requestMonitor.checkRateLimit(deviceHash, req.path)) {
+        return res.status(429).json({ 
+            success: false,
+            error: 'Too many requests',
+            code: 'RATE_LIMIT_EXCEEDED'
+        });
+    }
+
+    // 4. التحقق من initData لطلبات POST
     if (req.method === 'POST' && req.body && req.body.initData) {
         const deviceValidation = deviceFingerprint.validateDeviceUser(req, req.body.initData);
         if (!deviceValidation.success) {
@@ -1715,6 +1833,121 @@ app.get('/api/referrals/user/:userId', async (req, res) => {
     }
 });
 
+// 🔒 نظام الحماية - نقاط نهاية جديدة
+app.post('/api/validate-initdata', async (req, res) => {
+    try {
+        const { initData } = req.body;
+        
+        if (!initData) {
+            return res.status(400).json({ success: false, error: 'initData is required' });
+        }
+        
+        const isValid = validateTelegramInitData(initData);
+        
+        if (isValid) {
+            const telegramUser = parseTelegramUser(initData);
+            const deviceHash = deviceFingerprint.generateDeviceFingerprint(req, initData);
+            
+            res.json({
+                success: true,
+                userId: telegramUser?.id,
+                deviceHash: deviceHash,
+                message: 'Telegram initData is valid'
+            });
+        } else {
+            res.status(401).json({
+                success: false,
+                error: 'Invalid Telegram initData'
+            });
+        }
+    } catch (error) {
+        console.error('❌ خطأ في التحقق من initData:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/api/security/status', async (req, res) => {
+    try {
+        res.json({
+            success: true,
+            security: {
+                deviceFingerprint: {
+                    totalDevices: deviceFingerprint.deviceUsers.size,
+                    bannedDevices: deviceFingerprint.bannedDevices.size,
+                    deviceProfiles: deviceFingerprint.deviceProfiles.size,
+                    suspiciousActivities: deviceFingerprint.suspiciousActivities.size
+                },
+                requestMonitor: {
+                    userErrors: requestMonitor.userErrors.size,
+                    deviceErrors: requestMonitor.deviceErrors.size,
+                    requestLimits: requestMonitor.requestLimits.size
+                },
+                telegramEnforcer: 'active',
+                tokenSystem: tokenSystem.getStats(),
+                geolocation: {
+                    bannedCountries: geolocationSystem.getBannedCountries(),
+                    countryCache: geolocationSystem.countryCache.size
+                }
+            },
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('❌ خطأ في جلب حالة الحماية:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/api/security/report', async (req, res) => {
+    try {
+        const { initData, activityType, details } = req.body;
+        
+        if (!validateTelegramInitData(initData)) {
+            return res.status(401).json({ success: false, error: 'Invalid initData' });
+        }
+        
+        const telegramUser = parseTelegramUser(initData);
+        const deviceHash = deviceFingerprint.generateDeviceFingerprint(req, initData);
+        
+        deviceFingerprint.recordSuspiciousActivity(deviceHash, activityType, details);
+        
+        console.log(`⚠️  تم الإبلاغ عن نشاط مشبوه: ${activityType} من المستخدم ${telegramUser?.id}`);
+        
+        res.json({
+            success: true,
+            message: 'Suspicious activity reported successfully',
+            activityType: activityType,
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('❌ خطأ في الإبلاغ عن النشاط المشبوه:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 🌍 نظام كشف الدولة
+app.get('/api/geolocation/detect', async (req, res) => {
+    try {
+        const ip = req.headers['x-forwarded-for'] || 
+                  req.headers['x-real-ip'] || 
+                  req.connection.remoteAddress || 
+                  req.socket.remoteAddress;
+        
+        const countryInfo = await geolocationSystem.detectCountry(ip);
+        const isAllowed = geolocationSystem.isCountryAllowed(countryInfo.countryCode);
+        
+        res.json({
+            success: true,
+            ip: ip,
+            country: countryInfo,
+            isAllowed: isAllowed,
+            message: isAllowed ? 'Country is allowed' : 'Country is banned'
+        });
+    } catch (error) {
+        console.error('❌ خطأ في كشف الدولة:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // 🩹 فحص وإصلاح الجداول
 app.get('/api/check-tables', async (req, res) => {
     try {
@@ -1856,6 +2089,11 @@ app.get('/api/health', async (req, res) => {
             timestamp: new Date().toISOString(),
             database: dbStatus ? 'connected' : 'disconnected',
             tokenSystem: tokenStats,
+            security: {
+                deviceFingerprint: deviceFingerprint.deviceUsers.size,
+                bannedDevices: deviceFingerprint.bannedDevices.size,
+                requestMonitor: requestMonitor.userErrors.size
+            },
             uptime: process.uptime()
         });
     } catch (error) {
@@ -1922,7 +2160,10 @@ app.get('/api/security/status', (req, res) => {
                 deviceErrors: requestMonitor.deviceErrors.size
             },
             telegramEnforcer: 'active',
-            tokenSystem: tokenSystem.getStats()
+            tokenSystem: tokenSystem.getStats(),
+            geolocation: {
+                bannedCountries: geolocationSystem.getBannedCountries()
+            }
         }
     });
 });
@@ -1959,7 +2200,9 @@ setTimeout(() => {
         console.log(`   ├─ Device Fingerprinting: ACTIVE`);
         console.log(`   ├─ Multiple Accounts Prevention: ACTIVE`);
         console.log(`   ├─ Request Monitoring: ACTIVE`);
-        console.log(`   └─ Telegram Only: ACTIVE`);
+        console.log(`   ├─ Rate Limiting: ACTIVE`);
+        console.log(`   ├─ Telegram Only: ACTIVE`);
+        console.log(`   └─ Geolocation Filtering: ACTIVE`);
         
         checkDatabaseConnection();
         
