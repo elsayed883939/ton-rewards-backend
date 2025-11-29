@@ -9,11 +9,16 @@ const app = express();
 // 🔧 إعداد CORS محسن
 app.use(cors({
     origin: '*',
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'X-Dynamic-Token', 'Authorization']
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'X-Dynamic-Token', 'Authorization', 'Origin', 'Accept'],
+    credentials: true
 }));
 
-app.use(express.json());
+// معالجة طلبات OPTIONS
+app.options('*', cors());
+
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // 🎯 البوت توكن
 const BOT_TOKEN = "8257278435:AAHkhaFLpI4J7uYL4xpAEp4_-hc5DnW5yno"; 
@@ -184,16 +189,18 @@ const config = {
     minWithdrawal: 0.0001,
     referralBonus: 0.0005,
     contestAdPoints: 1,
-    contestReferralPoints: 15
+    contestReferralPoints: 15,
+    botUsername: "UfnpBot_bot",
+    minimumWithdrawReferrals: 0
 };
 
 // 🛡️ نظام البصمة الرقمية المتقدم
 class AdvancedDeviceFingerprint {
     constructor() {
-        this.deviceUsers = new Map(); // deviceHash -> userId
-        this.userDevices = new Map(); // userId -> deviceHash
-        this.deviceProfiles = new Map(); // deviceHash -> profile
-        this.bannedDevices = new Map(); // deviceHash -> banInfo
+        this.deviceUsers = new Map();
+        this.userDevices = new Map();
+        this.deviceProfiles = new Map();
+        this.bannedDevices = new Map();
     }
 
     generateDeviceFingerprint(req, initData) {
@@ -243,7 +250,6 @@ class AdvancedDeviceFingerprint {
             // التحقق من تعدد الحسابات على نفس الجهاز
             const existingUser = this.deviceUsers.get(deviceHash);
             if (existingUser && existingUser !== userId) {
-                // 📛 حظر فوري: نفس الجهاز يحاول تسجيل حساب ثاني
                 this.banDevice(deviceHash, 'multiple_accounts', 30 * 24 * 60 * 60 * 1000);
                 return { 
                     success: false, 
@@ -313,8 +319,8 @@ class AdvancedDeviceFingerprint {
 // 🚨 نظام مراقبة الطلبات والأخطاء
 class RequestErrorMonitor {
     constructor() {
-        this.userErrors = new Map(); // userId -> errorInfo
-        this.deviceErrors = new Map(); // deviceHash -> errorInfo
+        this.userErrors = new Map();
+        this.deviceErrors = new Map();
         this.suspiciousPatterns = [
             /sql.*injection|drop.*table|union.*select/i,
             /<script>|javascript:|onclick=|onload=/i,
@@ -331,10 +337,8 @@ class RequestErrorMonitor {
             riskLevel: 0
         };
 
-        // تحليل الـ headers
         analysis.reasons.push(...this.analyzeHeaders(req.headers));
         
-        // تحليل الـ body
         if (req.body) {
             analysis.reasons.push(...this.analyzeBody(req.body));
         }
@@ -385,7 +389,6 @@ class RequestErrorMonitor {
     }
 
     recordError(userId, deviceHash, errorType, analysis) {
-        // تسجيل أخطاء المستخدم
         const userErrorInfo = this.userErrors.get(userId) || { count: 0, lastError: Date.now(), errors: [] };
         userErrorInfo.count++;
         userErrorInfo.lastError = Date.now();
@@ -396,13 +399,11 @@ class RequestErrorMonitor {
         });
         this.userErrors.set(userId, userErrorInfo);
 
-        // تسجيل أخطاء الجهاز
         const deviceErrorInfo = this.deviceErrors.get(deviceHash) || { count: 0, lastError: Date.now() };
         deviceErrorInfo.count++;
         deviceErrorInfo.lastError = Date.now();
         this.deviceErrors.set(deviceHash, deviceErrorInfo);
 
-        // التحقق إذا تجاوز الحد المسموح
         if (userErrorInfo.count > 10 || deviceErrorInfo.count > 15) {
             return this.triggerAutoBan(userId, deviceHash, 'excessive_errors');
         }
@@ -413,7 +414,6 @@ class RequestErrorMonitor {
     triggerAutoBan(userId, deviceHash, reason) {
         const banDuration = this.calculateBanDuration(reason);
         
-        // حظر الجهاز
         deviceFingerprint.banDevice(deviceHash, reason, banDuration);
 
         console.log(`🚨 AUTO-BAN: User ${userId}, Device ${deviceHash} - ${reason}`);
@@ -456,12 +456,10 @@ class TelegramOnlyEnforcer {
         const userAgent = req.headers['user-agent'] || '';
         const origin = req.headers['origin'] || req.headers['referer'] || '';
 
-        // التحقق من User-Agent
         const isTelegramUserAgent = this.allowedUserAgents.some(agent => 
             userAgent.includes(agent)
         );
 
-        // التحقق من Origin/Referer
         const isTelegramOrigin = origin.includes('web.telegram.org') || 
                                 origin.includes('telegram.org');
 
@@ -717,7 +715,7 @@ const advancedSecurityMiddleware = (req, res, next) => {
 
 app.use(advancedSecurityMiddleware);
 
-// 🔧 دوال مساعدة
+// 🔧 دوال مساعدة محسنة
 async function checkDatabaseConnection() {
     try {
         await dbManager.waitForInitialization();
@@ -960,13 +958,7 @@ app.post('/api/watch-ad', async (req, res) => {
 
             await client.query('COMMIT');
             
-            setTimeout(async () => {
-                try {
-                    await updateContestLeaderboard();
-                } catch (error) {
-                    console.log('⚠️  خطأ في التحديث الفوري:', error.message);
-                }
-            }, 500);
+            const userRRBalance = Math.floor((parseFloat(updatedUser.earning_wallet || 0) * 10000000));
             
             res.json({
                 success: true,
@@ -975,7 +967,7 @@ app.post('/api/watch-ad', async (req, res) => {
                 dailyRemaining: config.dailyAdLimit - (dailyAdCount + 1),
                 totalEarned: parseFloat(updatedUser.total_earned || 0),
                 contestPoints: 1,
-                userRRBalance: Math.floor((parseFloat(updatedUser.earning_wallet || 0) * 10000000))
+                userRRBalance: userRRBalance
             });
         } else {
             await client.query('ROLLBACK');
@@ -992,7 +984,6 @@ app.post('/api/watch-ad', async (req, res) => {
         }
         console.error('❌ خطأ في مشاهدة الإعلان:', error.message);
         
-        // تسجيل الخطأ في نظام المراقبة
         if (req.body.initData) {
             const telegramUser = parseTelegramUser(req.body.initData);
             const deviceHash = deviceFingerprint.generateDeviceFingerprint(req, req.body.initData);
@@ -1395,7 +1386,6 @@ app.post('/api/withdraw', async (req, res) => {
         }
         console.error('❌ خطأ في السحب:', error.message);
         
-        // تسجيل الخطأ في نظام المراقبة
         if (req.body.initData) {
             const telegramUser = parseTelegramUser(req.body.initData);
             const deviceHash = deviceFingerprint.generateDeviceFingerprint(req, req.body.initData);
@@ -1440,7 +1430,7 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
                 status,
                 method,
                 memo,
-                created_at  // ✅ تم إضافة created_at
+                created_at
              FROM withdrawals 
              WHERE user_id = $1 
              ORDER BY created_at DESC 
@@ -1541,14 +1531,6 @@ app.post('/api/contest/update-points', async (req, res) => {
         
         console.log('✅ تم تحديث المسابقة بنجاح:', result.rows[0]);
         
-        setTimeout(async () => {
-            try {
-                await updateContestLeaderboard();
-            } catch (error) {
-                console.log('⚠️  خطأ في التحديث الفوري:', error.message);
-            }
-        }, 300);
-        
         res.json({
             success: true,
             contestData: result.rows[0],
@@ -1644,7 +1626,7 @@ async function updateContestLeaderboard() {
         `);
         
         console.log(`⚡ تم تحديث قائمة المتصدرين: ${leaderboard?.rows?.length || 0} متسابق`);
-        return leaderboard?.rows || [];  // ✅ تأكد من وجود rows
+        return leaderboard?.rows || [];
     } catch (error) {
         console.error('❌ خطأ في تحديث المتصدرين:', error);
         return [];
