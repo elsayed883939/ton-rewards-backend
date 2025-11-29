@@ -3,15 +3,45 @@ const cors = require('cors');
 const crypto = require('crypto');
 const { Pool } = require('pg');
 const querystring = require('querystring');
+const helmet = require('helmet');
 
 const app = express();
 
-// 🔧 إعداد CORS محسن
+// 🔧 إعداد CORS محسن - التليجرام فقط
 app.use(cors({
-    origin: '*',
+    origin: (origin, callback) => {
+        const allowedOrigins = [
+            'https://web.telegram.org',
+            'https://telegram.org',
+            'https://t.me'
+        ];
+        
+        // السماح بطلبات بدون origin (مثل التليجرام ويب أب)
+        if (!origin || allowedOrigins.some(allowed => origin.includes(allowed))) {
+            callback(null, true);
+        } else {
+            console.log('🚫 CORS blocked:', origin);
+            callback(new Error('Not allowed by CORS - Telegram only'));
+        }
+    },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'X-Dynamic-Token', 'Authorization', 'Origin', 'Accept'],
     credentials: true
+}));
+
+// 🛡️ إضافة Helmet للأمان
+app.use(helmet({
+    contentSecurityPolicy: {
+        directives: {
+            defaultSrc: ["'self'"],
+            scriptSrc: ["'self'", "'unsafe-inline'", "https://telegram.org"],
+            styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+            fontSrc: ["'self'", "https://fonts.gstatic.com"],
+            imgSrc: ["'self'", "data:", "https:", "http:"],
+            connectSrc: ["'self'", "https://web.telegram.org"]
+        }
+    },
+    crossOriginEmbedderPolicy: false
 }));
 
 // معالجة طلبات OPTIONS
@@ -31,11 +61,18 @@ class DatabaseManager {
         this.retryCount = 0;
         this.maxRetries = 10;
         this.initialized = false;
+        this.circuitState = 'CLOSED';
+        this.failureCount = 0;
+        this.nextAttempt = Date.now();
         this.initPromise = this.init();
     }
 
     async init() {
         try {
+            if (this.circuitState === 'OPEN' && Date.now() < this.nextAttempt) {
+                throw new Error('Circuit breaker is OPEN');
+            }
+
             console.log('🔧 بدء تهيئة اتصال قاعدة البيانات...');
             
             this.pool = new Pool({
@@ -55,6 +92,9 @@ class DatabaseManager {
             this.isConnected = true;
             this.retryCount = 0;
             this.initialized = true;
+            this.circuitState = 'CLOSED';
+            this.failureCount = 0;
+            
             console.log('✅ تم الاتصال بقاعدة البيانات بنجاح');
             
         } catch (error) {
@@ -83,8 +123,15 @@ class DatabaseManager {
     }
 
     async handleConnectionError(error) {
+        this.failureCount++;
         this.retryCount++;
         
+        if (this.failureCount >= 3) {
+            this.circuitState = 'OPEN';
+            this.nextAttempt = Date.now() + 30000; // فتح بعد 30 ثانية
+            console.log('🔴 Circuit breaker OPEN - إيقاف الاتصال مؤقتاً');
+        }
+
         if (this.retryCount <= this.maxRetries) {
             console.log(`🔄 محاولة إعادة الاتصال ${this.retryCount}/${this.maxRetries}...`);
             const delay = Math.min(5000 * this.retryCount, 30000);
@@ -120,6 +167,13 @@ class DatabaseManager {
     async query(text, params) {
         await this.waitForInitialization();
         
+        if (this.circuitState === 'OPEN') {
+            if (Date.now() < this.nextAttempt) {
+                throw new Error('قاعدة البيانات غير متاحة مؤقتاً - Circuit breaker OPEN');
+            }
+            this.circuitState = 'HALF_OPEN';
+        }
+        
         if (!this.isConnected) {
             throw new Error('قاعدة البيانات غير متصلة');
         }
@@ -127,6 +181,13 @@ class DatabaseManager {
         try {
             console.log(`📝 تنفيذ استعلام: ${text.substring(0, 100)}...`);
             const result = await this.pool.query(text, params);
+            
+            // إعادة ضبط حالة الدائرة عند النجاح
+            if (this.circuitState === 'HALF_OPEN') {
+                this.circuitState = 'CLOSED';
+                this.failureCount = 0;
+            }
+            
             return result;
         } catch (error) {
             console.error('❌ خطأ في استعلام قاعدة البيانات:', error.message);
@@ -202,6 +263,7 @@ class AdvancedDeviceFingerprint {
         this.deviceProfiles = new Map();
         this.bannedDevices = new Map();
         this.suspiciousActivities = new Map();
+        this.requestCounts = new Map();
     }
 
     generateDeviceFingerprint(req, initData) {
@@ -223,10 +285,11 @@ class AdvancedDeviceFingerprint {
     }
 
     extractIP(req) {
-        return req.headers['x-forwarded-for'] || 
+        return req.headers['x-forwarded-for']?.split(',')[0] || 
                req.headers['x-real-ip'] || 
                req.connection.remoteAddress || 
-               req.socket.remoteAddress;
+               req.socket.remoteAddress ||
+               'unknown';
     }
 
     validateDeviceUser(req, initData) {
@@ -307,7 +370,8 @@ class AdvancedDeviceFingerprint {
             firstSeen: Date.now(),
             requestCount: 0,
             lastSeen: Date.now(),
-            userAgent: req.headers['user-agent']
+            userAgent: req.headers['user-agent'],
+            ip: this.extractIP(req)
         };
 
         profile.requestCount++;
@@ -339,6 +403,47 @@ class AdvancedDeviceFingerprint {
 
         console.log(`⚠️  نشاط مشبوه مسجل: ${activityType} للجهاز ${deviceHash}`);
     }
+
+    // 🔄 نظام Rate Limiting محسن
+    checkRateLimit(deviceHash, endpoint) {
+        const key = `${deviceHash}:${endpoint}`;
+        const now = Date.now();
+        const windowStart = now - 60000; // نافذة 60 ثانية
+
+        if (!this.requestCounts.has(key)) {
+            this.requestCounts.set(key, []);
+        }
+
+        const requests = this.requestCounts.get(key);
+        
+        // إزالة الطلبات القديمة
+        const recentRequests = requests.filter(time => time > windowStart);
+        this.requestCounts.set(key, recentRequests);
+
+        // تحديد الحدود حسب نوع الـ endpoint
+        const limits = {
+            '/api/watch-ad': 10,
+            '/api/withdraw': 3,
+            '/api/register': 5,
+            'default': 30
+        };
+
+        const limit = limits[endpoint] || limits.default;
+
+        // التحقق من الحد
+        if (recentRequests.length >= limit) {
+            this.recordSuspiciousActivity(deviceHash, 'rate_limit_exceeded', {
+                endpoint,
+                requests: recentRequests.length,
+                limit
+            });
+            return false;
+        }
+
+        // تسجيل الطلب الجديد
+        recentRequests.push(now);
+        return true;
+    }
 }
 
 // 🚨 نظام مراقبة الطلبات والأخطاء
@@ -353,7 +458,6 @@ class RequestErrorMonitor {
             /\.\.\/|\.\.\\/i,
             /bin\/sh|cmd\.exe|powershell/i
         ];
-        this.requestLimits = new Map();
     }
 
     analyzeRequest(req, error = null) {
@@ -386,6 +490,11 @@ class RequestErrorMonitor {
             reasons.push('suspicious_user_agent');
         }
 
+        // التحقق من أن الطلب من التليجرام
+        if (!this.isTelegramRequest(headers)) {
+            reasons.push('non_telegram_request');
+        }
+
         return reasons;
     }
 
@@ -412,6 +521,24 @@ class RequestErrorMonitor {
             'headless', 'phantomjs', 'selenium', 'puppeteer'
         ];
         return suspiciousAgents.some(agent => userAgent.toLowerCase().includes(agent));
+    }
+
+    isTelegramRequest(headers) {
+        const userAgent = headers['user-agent'] || '';
+        const origin = headers['origin'] || '';
+        const referer = headers['referer'] || '';
+
+        const isTelegramUserAgent = userAgent.includes('TelegramBot') || 
+                                   userAgent.includes('WebApp') ||
+                                   userAgent.includes('Mozilla/5.0 (iPhone; CPU iPhone OS') ||
+                                   userAgent.includes('Mozilla/5.0 (Android; Mobile;');
+
+        const isTelegramOrigin = origin.includes('web.telegram.org') || 
+                                origin.includes('telegram.org') ||
+                                referer.includes('web.telegram.org') ||
+                                referer.includes('telegram.org');
+
+        return isTelegramUserAgent || isTelegramOrigin || !origin; // السماح بطلبات بدون origin
     }
 
     recordError(userId, deviceHash, errorType, analysis) {
@@ -452,6 +579,7 @@ class RequestErrorMonitor {
         reasons.forEach(reason => {
             if (reason.includes('suspicious_pattern')) score += 30;
             if (reason.includes('suspicious_user_agent')) score += 25;
+            if (reason.includes('non_telegram_request')) score += 50; // أعلى درجة للطلبات غير التليجرام
             if (reason.includes('missing_or_short_user_agent')) score += 20;
             if (reason.includes('large_request_body')) score += 15;
         });
@@ -462,43 +590,19 @@ class RequestErrorMonitor {
         const durations = {
             'excessive_errors': 24 * 60 * 60 * 1000,
             'multiple_accounts': 30 * 24 * 60 * 60 * 1000,
-            'excessive_suspicious_activity': 24 * 60 * 60 * 1000
+            'excessive_suspicious_activity': 24 * 60 * 60 * 1000,
+            'non_telegram_request': 7 * 24 * 60 * 60 * 1000
         };
         return durations[reason] || 24 * 60 * 60 * 1000;
     }
-
-    // 🔒 نظام تحديد معدل الطلبات
-    checkRateLimit(deviceHash, endpoint) {
-        const key = `${deviceHash}:${endpoint}`;
-        const now = Date.now();
-        const windowStart = now - 60000; // نافذة 60 ثانية
-
-        if (!this.requestLimits.has(key)) {
-            this.requestLimits.set(key, []);
-        }
-
-        const requests = this.requestLimits.get(key);
-        
-        // إزالة الطلبات القديمة
-        const recentRequests = requests.filter(time => time > windowStart);
-        this.requestLimits.set(key, recentRequests);
-
-        // التحقق من الحد
-        if (recentRequests.length >= 60) { // 60 طلب في الدقيقة
-            return false;
-        }
-
-        // تسجيل الطلب الجديد
-        recentRequests.push(now);
-        return true;
-    }
 }
 
-// 🔒 نظام التحقق من التليجرام فقط
+// 🔒 نظام التحقق من التليجرام فقط - محسن
 class TelegramOnlyEnforcer {
     constructor() {
         this.allowedUserAgents = [
             'TelegramBot',
+            'WebApp',
             'Mozilla/5.0 (iPhone; CPU iPhone OS',
             'Mozilla/5.0 (Android; Mobile;',
             'Mozilla/5.0 (Linux; Android'
@@ -507,17 +611,37 @@ class TelegramOnlyEnforcer {
 
     validateTelegramOrigin(req) {
         const userAgent = req.headers['user-agent'] || '';
-        const origin = req.headers['origin'] || req.headers['referer'] || '';
+        const origin = req.headers['origin'] || '';
+        const referer = req.headers['referer'] || '';
 
         const isTelegramUserAgent = this.allowedUserAgents.some(agent => 
             userAgent.includes(agent)
         );
 
         const isTelegramOrigin = origin.includes('web.telegram.org') || 
-                                origin.includes('telegram.org');
+                                origin.includes('telegram.org') ||
+                                referer.includes('web.telegram.org') ||
+                                referer.includes('telegram.org');
 
-        if (!isTelegramUserAgent && !isTelegramOrigin) {
-            console.log('🚫 محاولة دخول من خارج التليجرام:', { userAgent, origin });
+        // السماح بطلبات بدون origin (مثل التليجرام ويب أب)
+        const allowNoOrigin = !origin && userAgent.includes('WebApp');
+
+        if (!isTelegramUserAgent && !isTelegramOrigin && !allowNoOrigin) {
+            console.log('🚫 محاولة دخول من خارج التليجرام:', { 
+                userAgent: userAgent.substring(0, 100), 
+                origin,
+                referer: referer.substring(0, 100)
+            });
+            
+            // تسجيل النشاط المشبوه
+            const deviceHash = deviceFingerprint.generateDeviceFingerprint(req, '');
+            deviceFingerprint.recordSuspiciousActivity(deviceHash, 'non_telegram_access', {
+                userAgent,
+                origin,
+                referer,
+                ip: deviceFingerprint.extractIP(req)
+            });
+            
             return false;
         }
 
@@ -525,7 +649,7 @@ class TelegramOnlyEnforcer {
     }
 }
 
-// 🔧 نظام التوكن الديناميكي
+// 🔧 نظام التوكن الديناميكي المحسن
 class DynamicTokenSystem {
     constructor() {
         this.tokens = new Map();
@@ -535,8 +659,8 @@ class DynamicTokenSystem {
         this.intervalId = null;
         
         this.config = {
-            tokenRefreshInterval: 9000,
-            tokenValidityWindow: 25000,
+            tokenRefreshInterval: 9000, // 9 ثواني
+            tokenValidityWindow: 25000, // 25 ثانية
             maxTokens: 20,
             secretKey: process.env.TOKEN_SECRET || 'ton-rewards-dynamic-token-secret-2024'
         };
@@ -666,6 +790,7 @@ class GeoLocationSystem {
                 return this.countryCache.get(ip);
             }
 
+            // استخدام خدمة مجانية لكشف الدولة
             const response = await fetch(`http://ip-api.com/json/${ip}`);
             const data = await response.json();
             
@@ -710,10 +835,12 @@ const requestMonitor = new RequestErrorMonitor();
 const telegramEnforcer = new TelegramOnlyEnforcer();
 const tokenSystem = new DynamicTokenSystem();
 const geolocationSystem = new GeoLocationSystem();
+
+// بدء نظام التوكن
 tokenSystem.start();
 
 // 🔧 middleware محسن للتحقق من التوكن والحماية
-const advancedSecurityMiddleware = (req, res, next) => {
+const advancedSecurityMiddleware = async (req, res, next) => {
     const publicEndpoints = [
         '/', 
         '/api/token/current', 
@@ -753,7 +880,7 @@ const advancedSecurityMiddleware = (req, res, next) => {
         return next();
     }
 
-    // 1. التحقق من التليجرام فقط
+    // 1. التحقق من التليجرام فقط - حماية مشددة
     if (!telegramEnforcer.validateTelegramOrigin(req)) {
         return res.status(403).json({ 
             success: false,
@@ -778,19 +905,23 @@ const advancedSecurityMiddleware = (req, res, next) => {
 
     if (!tokenSystem.validateToken(token)) {
         console.log('🔄 محاولة تجديد التوكن تلقائياً...');
-        tokenSystem.updateToken();
+        const newToken = tokenSystem.generateToken();
+        tokenSystem.tokens.set(newToken.token, newToken);
+        tokenSystem.currentToken = newToken.token;
         
         return res.status(401).json({ 
             success: false,
             error: 'توكن ديناميكي غير صالح أو منتهي',
             code: 'INVALID_DYNAMIC_TOKEN',
+            newToken: newToken.token,
+            retry: true,
             hint: 'جرب تحديث الصفحة'
         });
     }
 
     // 3. تحديد معدل الطلبات
     const deviceHash = deviceFingerprint.generateDeviceFingerprint(req, req.body?.initData);
-    if (!requestMonitor.checkRateLimit(deviceHash, req.path)) {
+    if (!deviceFingerprint.checkRateLimit(deviceHash, req.path)) {
         return res.status(429).json({ 
             success: false,
             error: 'Too many requests',
@@ -1879,8 +2010,7 @@ app.get('/api/security/status', async (req, res) => {
                 },
                 requestMonitor: {
                     userErrors: requestMonitor.userErrors.size,
-                    deviceErrors: requestMonitor.deviceErrors.size,
-                    requestLimits: requestMonitor.requestLimits.size
+                    deviceErrors: requestMonitor.deviceErrors.size
                 },
                 telegramEnforcer: 'active',
                 tokenSystem: tokenSystem.getStats(),
@@ -1927,10 +2057,7 @@ app.post('/api/security/report', async (req, res) => {
 // 🌍 نظام كشف الدولة
 app.get('/api/geolocation/detect', async (req, res) => {
     try {
-        const ip = req.headers['x-forwarded-for'] || 
-                  req.headers['x-real-ip'] || 
-                  req.connection.remoteAddress || 
-                  req.socket.remoteAddress;
+        const ip = deviceFingerprint.extractIP(req);
         
         const countryInfo = await geolocationSystem.detectCountry(ip);
         const isAllowed = geolocationSystem.isCountryAllowed(countryInfo.countryCode);
@@ -2135,7 +2262,8 @@ app.get('/api/database/status', async (req, res) => {
             success: true,
             connected: status,
             initialized: dbManager.initialized,
-            retryCount: dbManager.retryCount
+            retryCount: dbManager.retryCount,
+            circuitState: dbManager.circuitState
         });
     } catch (error) {
         res.json({
@@ -2144,28 +2272,6 @@ app.get('/api/database/status', async (req, res) => {
             error: error.message
         });
     }
-});
-
-// 🔍 endpoint لفحص نظام الحماية
-app.get('/api/security/status', (req, res) => {
-    res.json({
-        success: true,
-        security: {
-            deviceFingerprint: {
-                totalDevices: deviceFingerprint.deviceUsers.size,
-                bannedDevices: deviceFingerprint.bannedDevices.size
-            },
-            requestMonitor: {
-                userErrors: requestMonitor.userErrors.size,
-                deviceErrors: requestMonitor.deviceErrors.size
-            },
-            telegramEnforcer: 'active',
-            tokenSystem: tokenSystem.getStats(),
-            geolocation: {
-                bannedCountries: geolocationSystem.getBannedCountries()
-            }
-        }
-    });
 });
 
 // 🛑 إيقاف نظيف للسيرفر
@@ -2202,6 +2308,8 @@ setTimeout(() => {
         console.log(`   ├─ Request Monitoring: ACTIVE`);
         console.log(`   ├─ Rate Limiting: ACTIVE`);
         console.log(`   ├─ Telegram Only: ACTIVE`);
+        console.log(`   ├─ CORS Protection: ACTIVE`);
+        console.log(`   ├─ Circuit Breaker: ACTIVE`);
         console.log(`   └─ Geolocation Filtering: ACTIVE`);
         
         checkDatabaseConnection();
