@@ -6,21 +6,24 @@ const querystring = require('querystring');
 
 const app = express();
 
-// 🔧 إعداد CORS محدد للتليجرام فقط
+// 🔧 إعداد CORS محسن
 app.use(cors({
-    origin: ['https://web.telegram.org', 'https://telegram.org'],
-    methods: ['GET', 'POST'],
-    allowedHeaders: ['Content-Type', 'X-Dynamic-Token', 'Authorization'],
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'X-Dynamic-Token', 'Authorization', 'Origin', 'Accept'],
     credentials: true
 }));
 
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+// معالجة طلبات OPTIONS
+app.options('*', cors());
+
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // 🎯 البوت توكن
-const BOT_TOKEN = "8257278435:AAHkhaFLpI4J7uYL4xpAEp4_-hc5DnW5yno";
+const BOT_TOKEN = "8257278435:AAHkhaFLpI4J7uYL4xpAEp4_-hc5DnW5yno"; 
 
-// 💾 نظام إدارة قاعدة البيانات - الحفاظ على الكود الحالي تماماً
+// 🔧 نظام إدارة اتصال قاعدة البيانات المحسن
 class DatabaseManager {
     constructor() {
         this.pool = null;
@@ -66,6 +69,13 @@ class DatabaseManager {
             console.log('🔍 اختبار اتصال قاعدة البيانات...');
             const result = await client.query('SELECT NOW() as current_time');
             console.log('🕒 وقت قاعدة البيانات:', result.rows[0].current_time);
+            
+            const tablesResult = await client.query(`
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public'
+            `);
+            console.log('📊 عدد الجداول المتاحة:', tablesResult.rows.length);
             
         } finally {
             client.release();
@@ -115,6 +125,7 @@ class DatabaseManager {
         }
         
         try {
+            console.log(`📝 تنفيذ استعلام: ${text.substring(0, 100)}...`);
             const result = await this.pool.query(text, params);
             return result;
         } catch (error) {
@@ -153,6 +164,10 @@ class DatabaseManager {
         return await this.pool.connect();
     }
 
+    getPool() {
+        return this.pool;
+    }
+
     async healthCheck() {
         try {
             await this.query('SELECT 1 as health_check');
@@ -164,7 +179,22 @@ class DatabaseManager {
     }
 }
 
-// 🔥 نظام الحماية المتقدم
+// تهيئة مدير قاعدة البيانات
+const dbManager = new DatabaseManager();
+
+// 🔥 الإعدادات الجديدة
+const config = {
+    adValue: 0.0001,
+    dailyAdLimit: 100,
+    minWithdrawal: 0.0001,
+    referralBonus: 0.0005,
+    contestAdPoints: 1,
+    contestReferralPoints: 15,
+    botUsername: "UfnpBot_bot",
+    minimumWithdrawReferrals: 0
+};
+
+// 🔒 نظام الحماية المتقدم
 class AdvancedSecuritySystem {
     constructor() {
         this.deviceUsers = new Map(); // deviceHash -> userId
@@ -488,7 +518,7 @@ class AdvancedSecuritySystem {
     }
 }
 
-// 🔧 نظام التوكن الديناميكي - الحفاظ على النظام الحالي مع تحسينات
+// 🔧 نظام التوكن الديناميكي
 class EnhancedTokenSystem {
     constructor() {
         this.tokens = new Map();
@@ -587,114 +617,23 @@ class EnhancedTokenSystem {
 }
 
 // تهيئة الأنظمة
-const dbManager = new DatabaseManager();
 const securitySystem = new AdvancedSecuritySystem();
 const tokenSystem = new EnhancedTokenSystem();
 tokenSystem.start();
 
-// 🔥 الإعدادات الحالية - كما هي تماماً
-const config = {
-    adValue: 0.0001,
-    dailyAdLimit: 100,
-    minWithdrawal: 0.0001,
-    referralBonus: 0.0005,
-    contestAdPoints: 1,
-    contestReferralPoints: 15,
-    botUsername: "UfnpBot_bot",
-    minimumWithdrawReferrals: 0
-};
-
-// 🔐 ميدلوير الحماية المركزية - إضافة الحماية فقط
-const advancedSecurityMiddleware = (req, res, next) => {
-    const publicEndpoints = [
-        '/', 
-        '/api/token/current', 
-        '/api/token/stats', 
-        '/api/check-tables', 
-        '/api/setup-database', 
-        '/api/config',
-        '/api/fix-all-tables', 
-        '/api/fix-withdrawals-table', 
-        '/api/debug-tables', 
-        '/api/repair-database', 
-        '/api/debug-user',
-        '/api/reward-codes/validate', 
-        '/api/reward-codes/redeem',
-        '/api/fix-contest-data', 
-        '/api/fix-all-contest-data',
-        '/api/database/status', 
-        '/api/health', 
-        '/api/test-connection',
-        '/api/contest/leaderboard',
-        '/api/contest/user-rank/:userId',
-        '/api/contest/user/:userId',
-        '/api/validate-initdata',
-        '/api/stats',
-        '/api/security/status'
-    ];
-    
-    const isPublicEndpoint = publicEndpoints.some(endpoint => {
-        if (endpoint.includes(':')) {
-            const basePath = endpoint.split('/:')[0];
-            return req.path.startsWith(basePath);
-        }
-        return req.path === endpoint;
-    });
-    
-    if (isPublicEndpoint) {
-        return next();
+// 🔧 دوال مساعدة محسنة
+async function checkDatabaseConnection() {
+    try {
+        await dbManager.waitForInitialization();
+        const result = await dbManager.query('SELECT NOW() as current_time');
+        console.log('✅ قاعدة البيانات متصلة - الوقت الحالي:', result.rows[0].current_time);
+        return true;
+    } catch (error) {
+        console.error('❌ خطأ في الاتصال بقاعدة البيانات:', error.message);
+        return false;
     }
+}
 
-    // 1. التحقق من التوكن الديناميكي - كما هو
-    const token = req.headers['x-dynamic-token'] || 
-                  req.headers['authorization']?.replace('Bearer ', '') || 
-                  req.query.dynamicToken;
-
-    if (!token) {
-        console.log('❌ طلب بدون توكن:', req.path);
-        return res.status(401).json({ 
-            success: false,
-            error: 'التوكن الديناميكي مطلوب',
-            code: 'DYNAMIC_TOKEN_REQUIRED'
-        });
-    }
-
-    if (!tokenSystem.validateToken(token)) {
-        return res.status(401).json({ 
-            success: false,
-            error: 'توكن ديناميكي غير صالح أو منتهي',
-            code: 'INVALID_DYNAMIC_TOKEN'
-        });
-    }
-
-    // 2. التحقق من initData لطلبات POST - إضافة الحماية الجديدة
-    if (req.method === 'POST' && req.body && req.body.initData) {
-        const securityCheck = securitySystem.validateDeviceAndUser(req, req.body.initData);
-        
-        if (!securityCheck.success) {
-            if (securityCheck.banned) {
-                return res.status(403).json({ 
-                    success: false,
-                    error: securityCheck.error,
-                    code: 'DEVICE_BANNED',
-                    banned: true
-                });
-            }
-            
-            return res.status(403).json({ 
-                success: false,
-                error: securityCheck.error,
-                code: 'SECURITY_CHECK_FAILED'
-            });
-        }
-    }
-
-    next();
-};
-
-app.use(advancedSecurityMiddleware);
-
-// 🔧 كل الدوال المساعدة الحالية - كما هي تماماً
 function validateTelegramInitData(initData) {
     try {
         console.log('=== بدء التحقق من التوقيع ===');
@@ -801,7 +740,97 @@ async function createUserInDB(userData) {
     }
 }
 
-// 📺 مشاهدة إعلان - الحفاظ على الكود الحالي مع إضافة الحماية
+// 🔐 ميدلوير الحماية المركزية
+const advancedSecurityMiddleware = (req, res, next) => {
+    const publicEndpoints = [
+        '/', 
+        '/api/token/current', 
+        '/api/token/stats', 
+        '/api/check-tables', 
+        '/api/setup-database', 
+        '/api/config',
+        '/api/fix-all-tables', 
+        '/api/fix-withdrawals-table', 
+        '/api/debug-tables', 
+        '/api/repair-database', 
+        '/api/debug-user',
+        '/api/reward-codes/validate', 
+        '/api/reward-codes/redeem',
+        '/api/fix-contest-data', 
+        '/api/fix-all-contest-data',
+        '/api/database/status', 
+        '/api/health', 
+        '/api/test-connection',
+        '/api/contest/leaderboard',
+        '/api/contest/user-rank/:userId',
+        '/api/contest/user/:userId',
+        '/api/validate-initdata',
+        '/api/stats',
+        '/api/security/status'
+    ];
+    
+    const isPublicEndpoint = publicEndpoints.some(endpoint => {
+        if (endpoint.includes(':')) {
+            const basePath = endpoint.split('/:')[0];
+            return req.path.startsWith(basePath);
+        }
+        return req.path === endpoint;
+    });
+    
+    if (isPublicEndpoint) {
+        return next();
+    }
+
+    // 1. التحقق من التوكن الديناميكي
+    const token = req.headers['x-dynamic-token'] || 
+                  req.headers['authorization']?.replace('Bearer ', '') || 
+                  req.query.dynamicToken;
+
+    if (!token) {
+        console.log('❌ طلب بدون توكن:', req.path);
+        return res.status(401).json({ 
+            success: false,
+            error: 'التوكن الديناميكي مطلوب',
+            code: 'DYNAMIC_TOKEN_REQUIRED'
+        });
+    }
+
+    if (!tokenSystem.validateToken(token)) {
+        return res.status(401).json({ 
+            success: false,
+            error: 'توكن ديناميكي غير صالح أو منتهي',
+            code: 'INVALID_DYNAMIC_TOKEN'
+        });
+    }
+
+    // 2. التحقق من initData لطلبات POST
+    if (req.method === 'POST' && req.body && req.body.initData) {
+        const securityCheck = securitySystem.validateDeviceAndUser(req, req.body.initData);
+        
+        if (!securityCheck.success) {
+            if (securityCheck.banned) {
+                return res.status(403).json({ 
+                    success: false,
+                    error: securityCheck.error,
+                    code: 'DEVICE_BANNED',
+                    banned: true
+                });
+            }
+            
+            return res.status(403).json({ 
+                success: false,
+                error: securityCheck.error,
+                code: 'SECURITY_CHECK_FAILED'
+            });
+        }
+    }
+
+    next();
+};
+
+app.use(advancedSecurityMiddleware);
+
+// 📺 مشاهدة إعلان - مع الحماية المضافة
 app.post('/api/watch-ad', async (req, res) => {
     let client;
     
@@ -820,11 +849,6 @@ app.post('/api/watch-ad', async (req, res) => {
 
         if (!validateTelegramInitData(initData)) {
             console.log('❌ فشل التحقق - رفض مشاهدة الإعلان');
-            
-            // تسجيل محاولة اختراق في نظام الحماية الجديد
-            const deviceHash = securitySystem.generateDeviceFingerprint(req, initData);
-            securitySystem.recordSuspiciousActivity(deviceHash, 'محاولة مشاهدة إعلان بتوقيع مزيف');
-            
             return res.status(401).json({ 
                 success: false,
                 error: 'Invalid security signature' 
@@ -956,7 +980,6 @@ app.post('/api/watch-ad', async (req, res) => {
         }
         console.error('❌ خطأ في مشاهدة الإعلان:', error.message);
         
-        // تسجيل الخطأ في نظام الحماية الجديد
         if (req.body.initData) {
             const deviceHash = securitySystem.generateDeviceFingerprint(req, req.body.initData);
             securitySystem.recordSuspiciousActivity(deviceHash, 'خطأ في مشاهدة الإعلان', { error: error.message });
@@ -973,7 +996,7 @@ app.post('/api/watch-ad', async (req, res) => {
     }
 });
 
-// 👤 جلب بيانات المستخدم - الحفاظ على الكود الحالي
+// 👤 جلب بيانات المستخدم من قاعدة البيانات + تسجيل تلقائي
 app.get('/api/user/:userId', async (req, res) => {
     try {
         const userId = req.params.userId;
@@ -1060,7 +1083,7 @@ app.get('/api/user/:userId', async (req, res) => {
     }
 });
 
-// 👤 تسجيل مستخدم جديد - الحفاظ على الكود الحالي
+// 👤 تسجيل مستخدم جديد في قاعدة البيانات
 app.post('/api/register', async (req, res) => {
     try {
         const { initData } = req.body;
@@ -1155,7 +1178,7 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-// 💰 تحويل المحفظة إلى الرصيد - الحفاظ على الكود الحالي
+// 💰 تحويل المحفظة إلى الرصيد
 app.post('/api/move-to-balance', async (req, res) => {
     try {
         const { initData } = req.body;
@@ -1240,7 +1263,7 @@ app.post('/api/move-to-balance', async (req, res) => {
     }
 });
 
-// 💳 طلب سحب - الحفاظ على الكود الحالي
+// 💳 طلب سحب - مع الحماية المضافة
 app.post('/api/withdraw', async (req, res) => {
     let client;
     
@@ -1374,7 +1397,7 @@ app.post('/api/withdraw', async (req, res) => {
     }
 });
 
-// 📋 الحصول على تاريخ السحوبات - الحفاظ على الكود الحالي
+// 📋 الحصول على تاريخ السحوبات - مع الإصلاح
 app.get('/api/withdrawals/:userId', async (req, res) => {
     try {
         const userId = req.params.userId;
@@ -1452,7 +1475,7 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
     }
 });
 
-// 🏆 نظام المسابقة - الحفاظ على الكود الحالي
+// 🏆 نظام المسابقة
 app.post('/api/contest/update-points', async (req, res) => {
     try {
         const { userId, points = 1, adsWatched = 1, referralsCount = 0 } = req.body;
@@ -1513,7 +1536,7 @@ app.post('/api/contest/update-points', async (req, res) => {
     }
 });
 
-// 🏆 جلب المتصدرين مرتبين حسب النقاط - الحفاظ على الكود الحالي
+// 🏆 جلب المتصدرين مرتبين حسب النقاط
 app.get('/api/contest/leaderboard', async (req, res) => {
     try {
         const leaderboard = await dbManager.query(`
@@ -1542,7 +1565,7 @@ app.get('/api/contest/leaderboard', async (req, res) => {
     }
 });
 
-// 🏆 جلب ترتيب مستخدم معين - الحفاظ على الكود الحالي
+// 🏆 جلب ترتيب مستخدم معين
 app.get('/api/contest/user-rank/:userId', async (req, res) => {
     try {
         const userId = req.params.userId;
@@ -1570,7 +1593,7 @@ app.get('/api/contest/user-rank/:userId', async (req, res) => {
     }
 });
 
-// 🏆 جلب بيانات مسابقة مستخدم معين - الحفاظ على الكود الحالي
+// 🏆 جلب بيانات مسابقة مستخدم معين
 app.get('/api/contest/user/:userId', async (req, res) => {
     try {
         const userId = req.params.userId;
@@ -1591,7 +1614,7 @@ app.get('/api/contest/user/:userId', async (req, res) => {
     }
 });
 
-// 👥 نظام الإحالات - الحفاظ على الكود الحالي
+// 👥 نظام الإحالات
 app.post('/api/referrals/add', async (req, res) => {
     try {
         const { referrerId, referredId } = req.body;
@@ -1673,9 +1696,7 @@ app.get('/api/referrals/user/:userId', async (req, res) => {
     }
 });
 
-// 📊 نقاط النهاية للإدارة والمراقبة - الحفاظ على الكود الحالي
-
-// 🏥 endpoint للصحة العامة - مع إضافة إحصائيات الحماية
+// 🏥 endpoint للصحة العامة
 app.get('/api/health', async (req, res) => {
     try {
         const dbStatus = await dbManager.healthCheck();
@@ -1697,7 +1718,7 @@ app.get('/api/health', async (req, res) => {
     }
 });
 
-// 🔑 endpoints إضافية للتحكم - الحفاظ على الكود الحالي
+// 🔧 endpoints إضافية للتحكم
 app.get('/api/token/current', (req, res) => {
     res.json({
         success: true,
@@ -1746,7 +1767,7 @@ app.get('/api/security/status', (req, res) => {
     });
 });
 
-// 🩹 فحص وإصلاح الجداول - الحفاظ على الكود الحالي
+// 🩹 فحص وإصلاح الجداول
 app.get('/api/check-tables', async (req, res) => {
     try {
         console.log('🔍 فحص حالة الجداول...');
@@ -1792,7 +1813,7 @@ app.get('/api/check-tables', async (req, res) => {
     }
 });
 
-// 🔧 إنشاء الجداول إذا لم تكن موجودة - الحفاظ على الكود الحالي
+// 🔧 إنشاء الجداول إذا لم تكن موجودة
 app.get('/api/setup-database', async (req, res) => {
     try {
         console.log('🔧 بدء إعداد الجداول...');
@@ -1886,7 +1907,7 @@ process.on('SIGTERM', () => {
     process.exit(0);
 });
 
-// 🚀 تشغيل السيرفر - الحفاظ على الكود الحالي
+// 🚀 تشغيل السيرفر
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 
