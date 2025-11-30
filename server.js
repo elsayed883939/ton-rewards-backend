@@ -488,11 +488,12 @@ class RequestErrorMonitor {
     }
 }
 
-// 🔒 نظام التحقق من التليجرام فقط
+// 🔒 نظام التحقق من التليجرام فقط - معدل ومصحح
 class TelegramOnlyEnforcer {
     constructor() {
         this.allowedUserAgents = [
             'TelegramBot',
+            'TelegramWebApp', // ✅ إضافة هذا
             'Mozilla/5.0 (iPhone; CPU iPhone OS',
             'Mozilla/5.0 (Android; Mobile;',
             'Mozilla/5.0 (Linux; Android'
@@ -502,19 +503,25 @@ class TelegramOnlyEnforcer {
     validateTelegramOrigin(req) {
         const userAgent = req.headers['user-agent'] || '';
         const origin = req.headers['origin'] || req.headers['referer'] || '';
+        
+        console.log('🔍 User-Agent:', userAgent);
+        console.log('🔍 Origin:', origin);
 
-        const isTelegramUserAgent = this.allowedUserAgents.some(agent => 
-            userAgent.includes(agent)
-        );
+        // ✅ التحقق من Telegram Web App
+        const isTelegramWebApp = userAgent.includes('TelegramWebApp') || 
+                                origin.includes('web.telegram.org');
 
-        const isTelegramOrigin = origin.includes('web.telegram.org') || 
-                                origin.includes('telegram.org');
+        // ✅ التحقق من Telegram Bot
+        const isTelegramBot = userAgent.includes('TelegramBot');
 
-        if (!isTelegramUserAgent && !isTelegramOrigin) {
-            return false;
+        // ✅ السماح لطلبات من Telegram فقط
+        if (isTelegramWebApp || isTelegramBot) {
+            console.log('✅ طلب من Telegram - مسموح');
+            return true;
         }
 
-        return true;
+        console.log('❌ طلب غير مسموح - ليس من Telegram');
+        return false;
     }
 }
 
@@ -696,38 +703,17 @@ const telegramEnforcer = new TelegramOnlyEnforcer();
 const tokenSystem = new DynamicTokenSystem();
 const geolocationSystem = new GeoLocationSystem();
 tokenSystem.start();
-// 🔧 middleware محسن للتحقق من التوكن والحماية
+
+// 🔧 middleware محسن للتحقق من التوكن والحماية - معدل
 const advancedSecurityMiddleware = (req, res, next) => {
     const publicEndpoints = [
         '/', 
-        '/api/check-tables', 
-        '/api/setup-database', 
+        '/api/health',
         '/api/config',
-        '/api/fix-all-tables', 
-        '/api/fix-withdrawals-table', 
-        '/api/debug-tables', 
-        '/api/repair-database', 
-        '/api/debug-user',
-        '/api/reward-codes/validate', 
-        '/api/reward-codes/redeem',
-        '/api/fix-contest-data', 
-        '/api/fix-all-contest-data',
-        '/api/database/status', 
-        '/api/health', 
-        '/api/test-connection',
-        '/api/contest/leaderboard',
-        '/api/contest/user-rank/:userId',
-        '/api/contest/user/:userId',
-        '/api/validate-initdata',
-        '/api/stats',
-        '/api/security/status'
+        '/api/database/status'
     ];
     
     const isPublicEndpoint = publicEndpoints.some(endpoint => {
-        if (endpoint.includes(':')) {
-            const basePath = endpoint.split('/:')[0];
-            return req.path.startsWith(basePath);
-        }
         return req.path === endpoint;
     });
     
@@ -735,16 +721,17 @@ const advancedSecurityMiddleware = (req, res, next) => {
         return next();
     }
 
-    // 1. التحقق من التليجرام فقط
+    // 1. ✅ التحقق من التليجرام فقط
     if (!telegramEnforcer.validateTelegramOrigin(req)) {
         return res.status(403).json({ 
             success: false,
-            error: 'Access denied - Telegram only',
-            code: 'TELEGRAM_ONLY'
+            error: 'هذا التطبيق يعمل داخل Telegram فقط',
+            code: 'TELEGRAM_ONLY',
+            instructions: 'برجاء فتح الرابط من خلال تطبيق Telegram'
         });
     }
 
-    // 2. التحقق من التوكن
+    // 2. ✅ التحقق من التوكن
     const token = req.headers['x-dynamic-token'] || 
                   req.headers['authorization']?.replace('Bearer ', '') || 
                   req.query.dynamicToken;
@@ -1952,14 +1939,15 @@ app.get('/api/health', async (req, res) => {
 app.get('/api/token/current', (req, res) => {
     res.json({
         success: true,
-        message: 'System is operational'
+        token: tokenSystem.getCurrentToken(),
+        stats: tokenSystem.getStats()
     });
 });
 
 app.get('/api/token/stats', (req, res) => {
     res.json({
         success: true,
-        status: 'active'
+        stats: tokenSystem.getStats()
     });
 });
 
@@ -1990,11 +1978,13 @@ app.get('/api/database/status', async (req, res) => {
 
 // 🛑 إيقاف نظيف للسيرفر
 process.on('SIGINT', () => {
+    console.log('🛑 إيقاف السيرفر...');
     tokenSystem.stop();
     process.exit(0);
 });
 
 process.on('SIGTERM', () => {
+    console.log('🛑 إيقاف السيرفر...');
     tokenSystem.stop();
     process.exit(0);
 });
@@ -2006,6 +1996,7 @@ const HOST = process.env.HOST || '0.0.0.0';
 setTimeout(() => {
     app.listen(PORT, HOST, () => {
         console.log(`🟢 TON Rewards Backend running on port ${PORT}`);
+        console.log(`🔒 نظام التحقق من Telegram: نشط`);
         
         checkDatabaseConnection();
         
