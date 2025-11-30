@@ -696,13 +696,10 @@ const telegramEnforcer = new TelegramOnlyEnforcer();
 const tokenSystem = new DynamicTokenSystem();
 const geolocationSystem = new GeoLocationSystem();
 tokenSystem.start();
-
 // 🔧 middleware محسن للتحقق من التوكن والحماية
 const advancedSecurityMiddleware = (req, res, next) => {
     const publicEndpoints = [
         '/', 
-        '/api/token/current', 
-        '/api/token/stats', 
         '/api/check-tables', 
         '/api/setup-database', 
         '/api/config',
@@ -1482,7 +1479,6 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
         });
     }
 });
-
 // 🏆 نظام المسابقة
 app.post('/api/contest/update-points', async (req, res) => {
     try {
@@ -1956,15 +1952,14 @@ app.get('/api/health', async (req, res) => {
 app.get('/api/token/current', (req, res) => {
     res.json({
         success: true,
-        token: tokenSystem.getCurrentToken(),
-        stats: tokenSystem.getStats()
+        message: 'System is operational'
     });
 });
 
 app.get('/api/token/stats', (req, res) => {
     res.json({
         success: true,
-        stats: tokenSystem.getStats()
+        status: 'active'
     });
 });
 
