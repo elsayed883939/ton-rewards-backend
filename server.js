@@ -6,9 +6,13 @@ const querystring = require('querystring');
 
 const app = express();
 
-// 🔧 إعداد CORS محسن
+// 🔧 إعداد CORS محسن - السماح للواجهة الأمامية
 app.use(cors({
-    origin: '*',
+    origin: [
+        'https://fantastic-otter-799527.netlify.app',
+        'https://web.telegram.org',
+        'ton://'
+    ],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'X-Dynamic-Token', 'Authorization', 'Origin', 'Accept'],
     credentials: true
@@ -502,15 +506,13 @@ class RequestErrorMonitor {
     }
 }
 
-// 🔒 نظام التحقق من التليجرام فقط - تم التعديل
+// 🔒 نظام التحقق من التليجرام فقط - معدل للسماح للواجهة الأمامية
 class TelegramOnlyEnforcer {
     constructor() {
-        this.allowedUserAgents = [
-            'TelegramBot',
-            'Mozilla/5.0 (iPhone; CPU iPhone OS',
-            'Mozilla/5.0 (Android; Mobile;',
-            'Mozilla/5.0 (Linux; Android',
-            'Mozilla/5.0 (Windows NT'
+        this.allowedOrigins = [
+            'https://web.telegram.org',
+            'https://fantastic-otter-799527.netlify.app',
+            'ton://'
         ];
     }
 
@@ -518,12 +520,12 @@ class TelegramOnlyEnforcer {
         const userAgent = req.headers['user-agent'] || '';
         const origin = req.headers['origin'] || req.headers['referer'] || '';
 
-        // ✅ السماح بجميع المتصفحات مع التحقق من التليجرام فقط من خلال initData
-        const isTelegramOrigin = origin.includes('web.telegram.org') || 
-                                origin.includes('telegram.org') ||
-                                userAgent.includes('TelegramBot');
+        // ✅ السماح بالواجهة الأمامية + التليجرام
+        const isAllowedOrigin = this.allowedOrigins.some(allowed => 
+            origin.includes(allowed)
+        ) || userAgent.includes('TelegramBot');
 
-        if (!isTelegramOrigin) {
+        if (!isAllowedOrigin) {
             console.log('🚫 محاولة دخول من خارج التليجرام:', { userAgent, origin });
             return false;
         }
@@ -542,7 +544,7 @@ class DynamicTokenSystem {
         this.intervalId = null;
         
         this.config = {
-            tokenRefreshInterval: 9000, // 9 ثواني بدلاً من 10
+            tokenRefreshInterval: 9000, // 9 ثواني
             tokenValidityWindow: 25000, // 25 ثانية صلاحية
             maxTokens: 20,
             secretKey: process.env.TOKEN_SECRET || 'ton-rewards-dynamic-token-secret-2024'
@@ -889,6 +891,7 @@ const advancedSecurityMiddleware = (req, res, next) => {
 };
 
 app.use(advancedSecurityMiddleware);
+
 // 🔧 دوال مساعدة محسنة
 async function checkDatabaseConnection() {
     try {
@@ -1777,6 +1780,7 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
         });
     }
 });
+
 // 🏆 نظام المسابقة
 app.post('/api/contest/update-points', async (req, res) => {
     try {
